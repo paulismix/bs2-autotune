@@ -38,11 +38,13 @@ NoteTuple = Tuple[float, float, float]  # start [s], end [s], MIDI note
 @dataclass(frozen=True)
 class FeatureConfig:
     sr: int = ANALYSIS_SR
-    # tonal view
-    n_fft_a: int = 2048
+    # tonal view: long window and bands about half an ERB apart - the frequency
+    # resolution of the ear (single low harmonics and anything an octave below
+    # the played note are resolved, higher up several harmonics share a band)
+    n_fft_a: int = 4096
     hop_a: int = 512
-    n_bands_a: int = 64
-    fmin_a: float = 25.0
+    n_bands_a: int = 72
+    fmin_a: float = 16.0
     # transient view
     n_fft_b: int = 512
     hop_b: int = 128
@@ -83,20 +85,23 @@ def _mel_to_hz(m):
     return 700.0 * (10.0 ** (np.asarray(m, dtype=np.float64) / 2595.0) - 1.0)
 
 
-def mel_bands(sr: int, n_fft: int, n_bands: int, fmin: float, fmax: float):
-    """Triangular mel filter bank in a compact form.
+def _hz_to_erb(f):
+    return 21.4 * np.log10(4.37e-3 * np.asarray(f, dtype=np.float64) + 1.0)
 
-    Returns (start, length, weights, centers): band b averages the power bins
-    start[b] .. start[b]+length[b] with weights[b, :length[b]].
-    """
+
+def _erb_to_hz(e):
+    return (10.0 ** (np.asarray(e, dtype=np.float64) / 21.4) - 1.0) / 4.37e-3
+
+
+def _triangular_bands(sr: int, n_fft: int, edges: np.ndarray):
+    """Triangular bands from n+2 edge frequencies -> (start, length, weights, centers)."""
     n_bins = n_fft // 2 + 1
     bin_hz = sr / n_fft
-    fmax = min(fmax, sr / 2.0 - bin_hz)
-    edges = _mel_to_hz(np.linspace(_hz_to_mel(fmin), _hz_to_mel(fmax), n_bands + 2))
-    # every band at least ~1.5 bins wide (low bands of the short window)
-    for i in range(1, len(edges)):
+    edges = np.array(edges, dtype=np.float64)
+    for i in range(1, len(edges)):  # every band at least ~1.5 bins wide
         if edges[i] - edges[i - 1] < 0.75 * bin_hz:
             edges[i] = edges[i - 1] + 0.75 * bin_hz
+    n_bands = len(edges) - 2
     freqs = np.arange(n_bins) * bin_hz
     start = np.zeros(n_bands, dtype=np.int64)
     length = np.zeros(n_bands, dtype=np.int64)
@@ -108,7 +113,7 @@ def mel_bands(sr: int, n_fft: int, n_bands: int, fmin: float, fmax: float):
         w = np.maximum(0.0, np.minimum(up, down))
         nz = np.nonzero(w > 0)[0]
         if len(nz) == 0:
-            nz = np.array([int(round(ce / bin_hz))])
+            nz = np.array([min(n_bins - 1, int(round(ce / bin_hz)))])
             w[nz[0]] = 1.0
         start[b] = nz[0]
         length[b] = nz[-1] - nz[0] + 1
@@ -117,6 +122,22 @@ def mel_bands(sr: int, n_fft: int, n_bands: int, fmin: float, fmax: float):
     for b, row in enumerate(rows):
         weights[b, :len(row)] = row
     return start, length, weights, edges[1:-1].copy()
+
+
+def mel_bands(sr: int, n_fft: int, n_bands: int, fmin: float, fmax: float):
+    """Triangular mel filter bank in a compact form.
+
+    Returns (start, length, weights, centers): band b averages the power bins
+    start[b] .. start[b]+length[b] with weights[b, :length[b]].
+    """
+    fmax = min(fmax, sr / 2.0 - sr / n_fft)
+    return _triangular_bands(sr, n_fft, _mel_to_hz(np.linspace(_hz_to_mel(fmin), _hz_to_mel(fmax), n_bands + 2)))
+
+
+def erb_bands(sr: int, n_fft: int, n_bands: int, fmin: float, fmax: float):
+    """Triangular bands equally spaced on the ERB-rate scale (auditory resolution)."""
+    fmax = min(fmax, sr / 2.0 - sr / n_fft)
+    return _triangular_bands(sr, n_fft, _erb_to_hz(np.linspace(_hz_to_erb(fmin), _hz_to_erb(fmax), n_bands + 2)))
 
 
 # ---------------------------------------------------------------------------
@@ -299,12 +320,13 @@ def _modulation(power, offset_db, floor_db, band_group, n_groups, seg_start, seg
 
 
 class _Bank:
-    def __init__(self, sr, n_fft, hop, n_bands, fmin, fmax):
+    def __init__(self, sr, n_fft, hop, n_bands, fmin, fmax, scale="mel"):
         self.n_fft = n_fft
         self.hop = hop
         self.window = np.hanning(n_fft + 1)[:-1].astype(np.float32)
-        self.start, self.length, self.weights, self.centers = mel_bands(sr, n_fft, n_bands, fmin, fmax)
-        self.n_bands = n_bands
+        builder = erb_bands if scale == "erb" else mel_bands
+        self.start, self.length, self.weights, self.centers = builder(sr, n_fft, n_bands, fmin, fmax)
+        self.n_bands = len(self.start)
 
     def power(self, y: np.ndarray) -> np.ndarray:
         """Mel band power, frames centred on t * hop."""
@@ -320,16 +342,31 @@ class _Bank:
         return out
 
 
+    def mean_power(self, y: np.ndarray) -> np.ndarray:
+        """Band power averaged over all complete frames of a short segment."""
+        n_fft, hop = self.n_fft, self.hop
+        if len(y) < n_fft:
+            padded = np.zeros(n_fft, dtype=np.float32)
+            padded[:len(y)] = y
+            y = padded
+        frames = np.lib.stride_tricks.sliding_window_view(np.asarray(y, dtype=np.float32), n_fft)[::hop]
+        spec = scipy.fft.rfft(frames * self.window, axis=1)
+        out = np.empty((spec.shape[0], self.n_bands), dtype=np.float32)
+        _band_power(spec.view(np.float32).reshape(spec.shape[0], spec.shape[1], 2),
+                    self.start, self.length, self.weights, out)
+        return out.mean(axis=0)
+
+
 _BANKS: Dict[Tuple, Tuple[_Bank, _Bank]] = {}
 
 
 def _banks(cfg: FeatureConfig) -> Tuple[_Bank, _Bank]:
-    key = (cfg.sr, cfg.n_fft_a, cfg.hop_a, cfg.n_bands_a, cfg.fmin_a, cfg.n_fft_b, cfg.hop_b, cfg.n_bands_b,
-           cfg.fmin_b, cfg.fmax)
+    key = (cfg.sr, cfg.n_fft_a, cfg.hop_a, cfg.n_bands_a, cfg.fmin_a, cfg.n_fft_b, cfg.hop_b,
+           cfg.n_bands_b, cfg.fmin_b, cfg.fmax)
     if key not in _BANKS:
         _BANKS[key] = (
-            _Bank(cfg.sr, cfg.n_fft_a, cfg.hop_a, cfg.n_bands_a, cfg.fmin_a, cfg.fmax),
-            _Bank(cfg.sr, cfg.n_fft_b, cfg.hop_b, cfg.n_bands_b, cfg.fmin_b, cfg.fmax),
+            _Bank(cfg.sr, cfg.n_fft_a, cfg.hop_a, cfg.n_bands_a, cfg.fmin_a, cfg.fmax, "erb"),
+            _Bank(cfg.sr, cfg.n_fft_b, cfg.hop_b, cfg.n_bands_b, cfg.fmin_b, cfg.fmax, "mel"),
         )
     return _BANKS[key]
 
@@ -341,6 +378,10 @@ class Features:
     a: np.ndarray  # tonal view (frames, bands)
     b: np.ndarray  # transient view
     energy: float  # mean square of the waveform
+
+
+def tonal_bank(cfg: FeatureConfig = DEFAULT_CONFIG) -> _Bank:
+    return _banks(cfg)[0]
 
 
 def extract(y: np.ndarray, cfg: FeatureConfig = DEFAULT_CONFIG) -> Features:

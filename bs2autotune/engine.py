@@ -149,7 +149,8 @@ def _render_kernel(out, ev_on, ev_off, ev_note, P):
     f_sat = P[I_F_SAT]
     f_comp = P[I_F_COMP]
     dist = P[I_DIST]
-    dist_norm = 1.0 / math.sqrt(dist) if dist > 1.0 else 1.0
+    dist_in = dist * 0.25
+    dist_out = 4.0 / math.sqrt(dist) if dist > 1.0 else 4.0
     out_gain = P[I_OUT_GAIN]
     hp_r = 1.0 - 6.283185307179586 * P[I_OUT_HP] / sr
     if hp_r < 0.0:
@@ -484,10 +485,8 @@ def _render_kernel(out, ev_on, ev_off, ev_note, P):
             s4 = y + v
 
         # ---- distortion, VCA, output ----------------------------------------
-        if dist > 1.0:
-            y = _sat(y * dist) * dist_norm
-        else:
-            y = _sat(y)
+        # distortion stage: nearly linear at zero, saturating more and more
+        y = _sat(y * dist_in) * dist_out
         amp += damp
         y = y * amp
         hp_y = y - hp_x + hp_r * hp_y
@@ -495,6 +494,42 @@ def _render_kernel(out, ev_on, ev_off, ev_note, P):
         if -1e-12 < hp_y < 1e-12:
             hp_y = 0.0  # keep denormals out of the analysis
         out[n] = hp_y * out_gain
+
+
+def filter_mag_db(freqs: np.ndarray, sr: float, ftype: int, slope: int, shape: int, fc: float, k: float,
+                  k2: float, comp: float) -> np.ndarray:
+    """Magnitude response (dB) of the model filter - the same maths as the kernel.
+
+    ftype 0 = state variable filter (slope 0/1 = 12/24 dB, shape 0/1/2 = LP/BP/HP,
+    k = damping of the resonant stage, k2 = damping of the second stage),
+    ftype 1 = four pole ladder (k = feedback amount, comp = passband compensation).
+    """
+    fc = min(max(float(fc), 5.0), 0.45 * sr)
+    x = np.tan(np.pi * np.minimum(freqs, 0.499 * sr) / sr) / math.tan(math.pi * fc / sr)
+    jx = 1j * x
+    if int(ftype) == 0:
+        def stage(kk):
+            den = 1.0 - x * x + kk * jx
+            if shape == 0:
+                return 1.0 / den
+            if shape == 1:
+                return kk * jx / den
+            return -(x * x) / den
+
+        h = stage(k)
+        if int(slope) == 1:
+            h = h * stage(k2)
+    else:
+        g4 = 1.0 / (1.0 + jx) ** 4
+        h = (1.0 + comp * k) * g4 / (1.0 + k * g4)
+    return 20.0 * np.log10(np.abs(h) + 1e-9)
+
+
+def filter_response_db(freqs: np.ndarray, sr: float, P: np.ndarray, note: float) -> np.ndarray:
+    """Magnitude response (dB) of the filter described by an engine vector, at a held note."""
+    octave = P[I_F_LOG2HZ] + P[I_F_TRACK] * (note - P[I_F_TRACK_REF]) / 12.0
+    return filter_mag_db(freqs, sr, int(P[I_F_TYPE]), int(P[I_F_SLOPE]), int(P[I_F_SHAPE]), 2.0 ** octave,
+                         P[I_F_K], P[I_F_K2], P[I_F_COMP])
 
 
 # ---------------------------------------------------------------------------
@@ -572,7 +607,7 @@ class Physics:
     cutoff_acid: np.ndarray = field(default_factory=_default_cutoff_table)
     slope12_shift_oct: float = 0.0
     damping_classic: np.ndarray = field(default_factory=_default_damping_table)
-    damping_stage2: float = 1.0  # damping ratio of the second 2-pole stage
+    damping_stage2: float = 1.3  # damping (1/Q) of the second, non-resonant 2-pole stage of the 24 dB mode
     feedback_acid: np.ndarray = field(default_factory=_default_ladder_table)
     acid_comp: float = 0.3
     filter_sat: float = 0.0
@@ -697,7 +732,7 @@ def resolve(patch: Dict[str, int], physics: Physics, sr: float, seed: int = 1,
     if ftype == 0:
         P[I_F_LOG2HZ] = ph.cutoff_classic[freq] + (ph.slope12_shift_oct if slope == 0 else 0.0)
         P[I_F_K] = ph.damping_classic[res]
-        P[I_F_K2] = min(2.0, ph.damping_classic[res] * ph.damping_stage2)
+        P[I_F_K2] = ph.damping_stage2
     else:
         P[I_F_LOG2HZ] = ph.cutoff_acid[freq]
         P[I_F_K] = ph.feedback_acid[res]

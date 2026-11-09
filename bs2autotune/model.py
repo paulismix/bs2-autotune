@@ -33,7 +33,11 @@ class Model:
         self.phrase = phrase
         self.target = target
         self.sr = sr
+        # number of renders (different oscillator start phases) that are averaged:
+        # the oscillators of the real instrument run free, so one render is one
+        # random sample; the average is what the patch sounds like "in general"
         self.realizations = max(1, min(realizations, len(_PHASES)))
+        self.single_realizations = 1
         self.n_samples = target.n_samples if target is not None else int(round(phrase.duration * sr))
         self._on, self._off, self._note = phrase.arrays(float(sr))
         self.workers = workers or max(1, min(8, (os.cpu_count() or 2)))
@@ -49,9 +53,13 @@ class Model:
         return out
 
     def features(self, patch: Dict[str, int], realizations: Optional[int] = None) -> List[Features]:
-        k = self.realizations if realizations is None else realizations
-        if not two_sources(patch):
-            k = 1
+        if realizations is not None:
+            k = realizations
+        elif two_sources(patch):
+            k = self.realizations
+        else:
+            k = self.single_realizations
+        k = max(1, min(k, len(_PHASES)))
         cfg = self.target.cfg if self.target is not None else None
         out = []
         for r in range(k):
@@ -59,6 +67,11 @@ class Model:
             out.append(extract(y, cfg) if cfg is not None else extract(y))
         self.evaluations += 1
         return out
+
+    def set_precision(self, fine: bool) -> None:
+        """Coarse: one render per patch (fast).  Fine: phase-averaged renders."""
+        self.single_realizations = 3 if fine else 1
+        self.realizations = 3 if fine else 2
 
     # -- comparisons -----------------------------------------------------------
     def compare(self, patch: Dict[str, int]) -> dict:

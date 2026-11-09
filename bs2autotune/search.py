@@ -23,20 +23,11 @@ import numpy as np
 
 from .model import Model
 from .params import PARAMS, baseline_patch
+from .static_match import FILTER_MODES, StaticMatcher
 
 # ---------------------------------------------------------------------------
 # search space
 # ---------------------------------------------------------------------------
-
-FILTER_MODES: Dict[str, Dict[str, int]] = {
-    "lp24": {"filter_type": 0, "filter_slope": 1, "filter_shape": 0},
-    "lp12": {"filter_type": 0, "filter_slope": 0, "filter_shape": 0},
-    "acid": {"filter_type": 1, "filter_slope": 1, "filter_shape": 0},
-    "bp12": {"filter_type": 0, "filter_slope": 0, "filter_shape": 1},
-    "bp24": {"filter_type": 0, "filter_slope": 1, "filter_shape": 1},
-    "hp12": {"filter_type": 0, "filter_slope": 0, "filter_shape": 2},
-    "hp24": {"filter_type": 0, "filter_slope": 1, "filter_shape": 2},
-}
 
 # structure variable -> (choices, prior probabilities)
 STRUCT_VARS: Dict[str, Tuple[tuple, tuple]] = {
@@ -176,12 +167,12 @@ def complexity_penalty(patch: Dict[str, int]) -> float:
     """Tiny preference for simpler patches when the sound is equally close."""
     pen = 0.0
     if patch["mix_osc2"] > 0:
-        pen += 0.004
+        pen += 0.010
     if patch["mix_sub"] > 0:
-        pen += 0.002
+        pen += 0.005
     if patch["mix_noise"] > 0:
-        pen += 0.003
-    pen += 0.004 * patch["distortion"] / 127.0 + 0.003 * patch["filter_drive"] / 127.0
+        pen += 0.006
+    pen += 0.006 * patch["distortion"] / 127.0 + 0.005 * patch["filter_drive"] / 127.0
     loud = max(patch["mix_osc1"], patch["mix_osc2"], patch["mix_sub"])
     pen += 0.004 * (255 - loud) / 255.0  # keep the loudest source up (signal to noise on the hardware)
     return pen
@@ -299,6 +290,12 @@ class Objective:
     def one(self, patch: Dict[str, int]) -> float:
         return float(self([patch])[0])
 
+    def reset(self) -> None:
+        """Forget cached losses (the underlying objective has changed)."""
+        self.cache.clear()
+        self.best_loss = float("inf")
+        self.best_patch = None
+
 
 # ---------------------------------------------------------------------------
 # block-wise patch optimiser
@@ -380,8 +377,14 @@ class PatchOptimizer:
     def _allowed(self, update: Dict[str, int]) -> bool:
         return not any(k in self.frozen for k in update)
 
-    def try_variants(self, patch: Dict[str, int], loss: float, variants: List[Dict[str, int]]):
-        """Apply each variant (dict of changes) to the patch, keep the best."""
+    def try_variants(self, patch: Dict[str, int], loss: float, variants: List[Dict[str, int]],
+                     reopt: Sequence[str] = (), top: int = 3):
+        """Apply each variant (dict of changes) to the patch and keep the best.
+
+        A switch rarely pays off on its own - the controls coupled to it have
+        to follow.  ``reopt`` names those controls: the ``top`` variants get a
+        quick line search of each of them before the decision is made.
+        """
         variants = [v for v in variants if self._allowed(v)]
         if not variants or self.should_stop():
             return patch, loss
@@ -391,9 +394,19 @@ class PatchOptimizer:
             c.update(v)
             cands.append(c)
         losses = self.f(cands)
-        i = int(np.argmin(losses))
-        if losses[i] < loss - self.min_gain:
-            return cands[i], float(losses[i])
+        order = np.argsort(losses)
+        best_patch, best_loss = cands[int(order[0])], float(losses[order[0]])
+        if reopt:
+            for i in order[:top]:
+                c, l = cands[int(i)], float(losses[i])
+                if l > loss + 0.08:
+                    continue  # hopeless, do not waste evaluations on it
+                for key in reopt:
+                    c, l = self.line(c, l, key, 0.35, points=5)
+                if l < best_loss:
+                    best_patch, best_loss = c, l
+        if best_loss < loss - self.min_gain:
+            return best_patch, best_loss
         return patch, loss
 
     def line(self, patch: Dict[str, int], loss: float, key: str, width: float = 1.0, points: int = 9):
@@ -471,7 +484,7 @@ class PatchOptimizer:
                         variants.append({"osc1_wave": wave, "osc1_range": rng_, "osc1_pw": pw})
                 else:
                     variants.append({"osc1_wave": wave, "osc1_range": rng_})
-        patch, loss = self.try_variants(patch, loss, variants)
+        patch, loss = self.try_variants(patch, loss, variants, reopt=("filter_freq",))
         if patch["osc1_wave"] == 3:
             patch, loss = self.line(patch, loss, "osc1_pw", min(1.0, width * 2))
         return patch, loss
@@ -519,7 +532,7 @@ class PatchOptimizer:
             for octv in (62, 63):
                 for level in (90, 160, 255):
                     variants.append({"sub_wave": wave, "sub_oct": octv, "mix_sub": level})
-        patch, loss = self.try_variants(patch, loss, variants)
+        patch, loss = self.try_variants(patch, loss, variants, reopt=("mix_osc1", "filter_freq"))
         if patch["mix_sub"] > 0:
             patch, loss = self.line(patch, loss, "mix_sub", min(1.0, width * 2), points=7)
         return patch, loss
@@ -534,7 +547,7 @@ class PatchOptimizer:
                         if wave == 3:
                             v["osc2_pw"] = patch["osc2_pw"] if patch["mix_osc2"] > 0 else 64
                         variants.append(v)
-        patch, loss = self.try_variants(patch, loss, variants)
+        patch, loss = self.try_variants(patch, loss, variants, reopt=("osc2_fine", "mix_osc1", "filter_freq"))
         if patch["mix_osc2"] > 0:
             patch, loss = self.line(patch, loss, "osc2_fine", min(1.0, width * 2), points=9)
             patch, loss = self.line(patch, loss, "mix_osc2", min(1.0, width * 2), points=7)
@@ -544,9 +557,12 @@ class PatchOptimizer:
 
     def block_extras(self, patch, loss, width):
         patch, loss = self.try_variants(patch, loss, [{"mix_noise": v} for v in (0, 25, 60, 120)])
-        patch, loss = self.try_variants(patch, loss, [{"filter_drive": v} for v in (0, 25, 50, 80, 127)])
-        patch, loss = self.try_variants(patch, loss, [{"distortion": v} for v in (0, 25, 50, 80, 127)])
-        patch, loss = self.try_variants(patch, loss, [{"filter_track": v} for v in (0, 2, 4, 7)])
+        patch, loss = self.try_variants(patch, loss, [{"filter_drive": v} for v in (0, 25, 50, 80, 127)],
+                                        reopt=("filter_freq", "filter_res", "mix_osc1"), top=4)
+        patch, loss = self.try_variants(patch, loss, [{"distortion": v} for v in (0, 25, 50, 80, 127)],
+                                        reopt=("filter_res", "filter_freq", "amp_sustain"), top=4)
+        patch, loss = self.try_variants(patch, loss, [{"filter_track": v} for v in (0, 2, 4, 7)],
+                                        reopt=("filter_freq",))
         for key in ("filter_drive", "distortion", "mix_noise"):
             if patch[key] > 0:
                 patch, loss = self.line(patch, loss, key, min(1.0, width), points=7)
@@ -583,7 +599,7 @@ class PatchOptimizer:
                 break
         if polish_gens > 0 and not self.should_stop():
             self.phase = "joint polish"
-            patch, loss = self.polish(patch, loss, self.active_keys(patch), 0.05, polish_gens)
+            patch, loss = self.polish(patch, loss, self.active_keys(patch), 0.07, polish_gens)
             self._report(patch, loss)
         return patch, loss
 
@@ -594,8 +610,21 @@ def default_start() -> Dict[str, int]:
     return patch
 
 
+DYNAMIC_KEYS = ("amp_attack", "amp_decay", "amp_sustain", "amp_release", "filter_freq", "filter_env",
+                "mod_attack", "mod_decay", "mod_sustain", "mod_release")
+
+
 class ModelSearch:
-    """Global search for the patch whose model render is closest to the target."""
+    """Global search for the patch whose model render is closest to the target.
+
+    1. *static timbre* - an exhaustive search over the switches (waveforms,
+       octaves, sub, oscillator 2, filter mode) on the spectrum of a held note
+       at two moments, using a spectral dictionary (see static_match.py),
+    2. *dynamics* - amp and filter envelopes for the best structures, started
+       from several hypotheses ("the filter closes", "the amp decays", ...),
+    3. *joint refinement* - all continuous controls together, then block-wise
+       sweeps and a CMA-ES polish with phase-averaged renders.
+    """
 
     def __init__(self, model: Model, seed: int = 0, fixed: Optional[Dict[str, int]] = None,
                  progress: Optional[Callable[[dict], None]] = None,
@@ -606,54 +635,126 @@ class ModelSearch:
         self.progress = progress
         self.should_stop = should_stop or (lambda: False)
         self.objective = Objective(lambda patches: self.model.map(self.model.loss, patches), complexity_penalty)
+        self.static = StaticMatcher(model.physics, model.target, pool_map=model.map)
+        self.stage_info: Dict[str, object] = {}
 
-    def _starts(self, opt: PatchOptimizer, n: int) -> List[Dict[str, int]]:
-        """Pick promising starting points: fit the envelope once, then screen archetypes."""
-        base = default_start()
-        base.update(self.fixed)
-        loss = self.objective.one(base)
-        opt.phase = "amp envelope"
-        base, loss = opt.block_amp(base, loss, 1.0)
-        variants = []
-        for wave in range(4):
-            for rng_ in (63, 64, 65, 66):
-                for mode in ("lp24", "lp12", "acid"):
-                    for cutoff in (80, 125, 170, 230):
-                        for sub in (0, 200):
-                            v = dict(FILTER_MODES[mode])
-                            v.update(osc1_wave=wave, osc1_range=rng_, filter_freq=cutoff, mix_sub=sub, sub_wave=2)
-                            variants.append(v)
-        opt.phase = "screening"
-        cands = [dict(base, **v) for v in variants if opt._allowed(v)]
-        losses = self.objective(cands)
-        order = np.argsort(losses)
-        starts, seen = [], set()
-        for i in order:
-            c = cands[int(i)]
-            sig = (c["osc1_wave"], c["osc1_range"])
-            if sig in seen:
-                continue
-            seen.add(sig)
-            starts.append(c)
-            if len(starts) >= n:
-                break
-        opt._report(starts[0], float(losses[order[0]]))
-        return starts
+    # -- stage 1 ---------------------------------------------------------------
+    def _stage_static(self, effort: float) -> List[Tuple[float, Dict[str, int], dict]]:
+        def report(step: int) -> None:
+            if self.progress is not None:
+                self.progress({"phase": "timbre", "step": step, "total": 3, "evaluations": 0,
+                               "best": float("nan"), "leader": None})
 
+        ranked = self.static.dictionary_search(keep=max(4, int(round(8 * effort))), progress=report,
+                                               fixed=self.fixed)
+        self.stage_info["static"] = [(round(l, 4), describe_structure(c), info) for l, c, info in ranked]
+        return ranked
+
+    # -- stage 2 ---------------------------------------------------------------
+    def _hypotheses(self, patch: Dict[str, int], info: dict) -> List[Dict[str, int]]:
+        """Different explanations of how the sound evolves in time."""
+        ph = self.model.physics
+        table = ph.cutoff_acid if patch["filter_type"] == 1 else ph.cutoff_classic
+        held = float(table[info["late"]])  # cutoff that fits the settled part of the notes
+        sweep = float(table[info["early"]]) - held  # how much more open the filter is at the start (octaves)
+
+        def raw_for(log2hz: float) -> int:
+            return int(np.argmin(np.abs(table - log2hz)))
+
+        def closing(depth_oct: float, sustain: int) -> Dict[str, int]:
+            """Envelope depth and base cutoff so that the cutoff settles on ``held``."""
+            depth_raw = int(min(max(64 + round(depth_oct / ph.env_oct_per_unit), 0), 127))
+            actual = (depth_raw - 64) * ph.env_oct_per_unit
+            level = (sustain / 127.0) ** ph.sustain_gamma
+            return {"filter_env": depth_raw, "filter_freq": raw_for(held - actual * level), "mod_sustain": sustain}
+
+        common = {"amp_attack": 0, "amp_release": 25, "mod_attack": 0, "mod_release": 30, "mod_decay": 55}
+        organ = {"amp_decay": 0, "amp_sustain": 127}
+        hyps = [
+            # the filter stands still, the amplifier shapes the note
+            dict(common, filter_env=64, filter_freq=info["late"], amp_decay=70, amp_sustain=100, mod_sustain=64),
+            # generic plucks
+            dict(common, **organ, **closing(5.0, 45)),
+            dict(common, **closing(4.5, 30), amp_decay=75, amp_sustain=60),
+        ]
+        if abs(sweep) > 0.3:
+            # the first 130 ms average over the sweep, so the real start is further out
+            hyps.append(dict(common, **organ, **closing(1.6 * sweep / 0.75, 40)))
+            hyps.append(dict(common, **organ, **closing(1.4 * sweep, 0)))
+            hyps.append(dict(common, **closing(1.6 * sweep / 0.75, 40), amp_decay=75, amp_sustain=60))
+        return [dict(patch, **{k: v for k, v in h.items() if k not in self.fixed}) for h in hyps]
+
+    def _timbre_keys(self, patch: Dict[str, int]) -> List[str]:
+        keys = ["filter_res", "mix_osc1"]
+        if patch["osc1_wave"] == 3:
+            keys.append("osc1_pw")
+        if patch["mix_osc2"] > 0:
+            keys.append("mix_osc2")
+            if patch["osc2_wave"] == 3:
+                keys.append("osc2_pw")
+        if patch["mix_sub"] > 0:
+            keys.append("mix_sub")
+        return keys
+
+    def _quick_dynamics(self, opt: "PatchOptimizer", patch: Dict[str, int], info: dict, effort: float):
+        hyps = self._hypotheses(patch, info)
+        losses = self.objective(hyps)
+        trials = []
+        for i in np.argsort(losses)[:2]:
+            h, l = opt.block_amp(hyps[int(i)], float(losses[i]), 1.0)
+            h, l = opt.polish(h, l, DYNAMIC_KEYS, 0.18, max(3, int(round(5 * effort))), lam=12)
+            trials.append((l, h))
+        trials.sort(key=lambda item: item[0])
+        return trials[0][1], trials[0][0]
+
+    # -- the search -------------------------------------------------------------
     def run(self, effort: float = 1.0, seeds: Optional[List[Dict[str, int]]] = None,
-            max_seconds: Optional[float] = None, n_starts: int = 3) -> SearchResult:
+            max_seconds: Optional[float] = None) -> SearchResult:
         t_start = time.time()
 
         def stop() -> bool:
             return self.should_stop() or (max_seconds is not None and time.time() - t_start > max_seconds)
 
+        statics = self._stage_static(effort)
         opt = PatchOptimizer(self.objective, self.seed, self.progress, stop, frozen=list(self.fixed))
-        starts = list(seeds or []) + self._starts(opt, max(1, int(round(n_starts * effort))))
-        results: List[Candidate] = []
-        for i, start in enumerate(starts):
-            if stop() and results:
+
+        # envelopes: a quick fit for every structure, a thorough one for the best
+        self.model.set_precision(fine=False)
+        quick: List[Tuple[float, Dict[str, int]]] = []
+        for seed_patch in seeds or []:
+            quick.append((self.objective.one(seed_patch), dict(seed_patch)))
+        for i, (_, st, info) in enumerate(statics):
+            if stop() and quick:
                 break
-            patch, loss = opt.optimise(start, polish_gens=int(30 * effort))
+            opt.phase = f"envelopes ({i + 1}/{len(statics)})"
+            patch, loss = self._quick_dynamics(opt, st, info, effort)
+            quick.append((loss, patch))
+            opt._report(min(quick, key=lambda item: item[0])[1], min(q[0] for q in quick))
+        quick.sort(key=lambda item: item[0])
+        self.stage_info["quick"] = [(round(l, 4), describe_structure(c)) for l, c in quick]
+        thorough: List[Tuple[float, Dict[str, int]]] = []
+        for i, (loss, patch) in enumerate(quick[:max(1, int(round(3 * effort)))]):
+            if stop() and thorough:
+                break
+            opt.phase = f"envelopes + timbre ({i + 1})"
+            keys = list(DYNAMIC_KEYS) + self._timbre_keys(patch)
+            patch, loss = opt.polish(patch, loss, keys, 0.12, max(6, int(round(22 * effort))), lam=14)
+            patch, loss = opt.block_extras(patch, loss, 1.0)
+            thorough.append((loss, patch))
+            opt._report(patch, loss)
+        thorough.sort(key=lambda item: item[0])
+        self.stage_info["thorough"] = [(round(l, 4), describe_structure(c)) for l, c in thorough]
+
+        # joint refinement with phase-averaged renders
+        self.model.set_precision(fine=True)
+        self.objective.reset()
+        results: List[Candidate] = []
+        for i, (_, patch) in enumerate(thorough):
+            if i >= 2 or (stop() and results):
+                results.append(Candidate(clean_patch(patch), self.objective.one(patch)))
+                continue
+            patch, loss = opt.optimise(patch, sweeps=(0.3, 0.12) if i == 0 else (0.3,),
+                                       polish_gens=int(30 * effort) if i == 0 else int(10 * effort))
             results.append(Candidate(clean_patch(patch), loss))
         results.sort(key=lambda c: c.loss)
         unique, seen = [], set()
