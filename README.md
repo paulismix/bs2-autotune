@@ -1,1 +1,1 @@
-# BS2-autotune
+# bs2-autotune
