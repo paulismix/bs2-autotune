@@ -49,6 +49,7 @@
           <label>Input channel<select id="input-channel"></select></label>
           <label>MIDI input <span class="opt">optional, for patch backup</span><select id="midi-in"></select></label>
         </div>
+        <label class="check"><input type="checkbox" id="fw-features"> Also set the functions added by newer firmware (2.5 and 4.14: filter tracking, oscillator error, envelope retrigger &hellip;) to neutral</label>
         <p class="warn-text" id="device-error" hidden></p>
         <details class="tips">
           <summary>Before you start</summary>
@@ -232,10 +233,12 @@
 
       <div class="sub" id="library-box" hidden>
         <div class="sub-head"><h3>Library</h3></div>
-        <table class="table" id="library">
-          <thead><tr><th>Name</th><th>Sound</th><th class="num">Distance</th><th>Saved</th><th></th></tr></thead>
-          <tbody></tbody>
-        </table>
+        <div class="table-wrap">
+          <table class="table" id="library">
+            <thead><tr><th>Name</th><th>Sound</th><th class="num">Distance</th><th>Saved</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
     </div>
   </section>

@@ -1,0 +1,13 @@
+# BS2 Autotune - runtime requirements (Python 3.10 - 3.12 recommended)
+numpy>=1.26
+scipy>=1.11
+numba>=0.59
+soundfile>=0.12.1
+sounddevice>=0.4.6
+mido>=1.3.2
+python-rtmidi>=1.5.8
+
+# Optional, for full songs (bass isolation); large download:
+#   pip install demucs
+# Optional, to run the tests:
+#   pip install pytest

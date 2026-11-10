@@ -486,13 +486,14 @@ class App:
             # times are relative to the analysed segment
             r0, r1 = t0 - a0, t1 - a0
             if explicit:
-                inside = [n for n in notes if r0 - 0.02 <= n.start < r1 - 0.05]
+                # a note that begins right at the end of the selection is left out,
+                # and the excerpt stops just before it
+                inside = [n for n in notes if r0 - 0.02 <= n.start < r1 - 0.12]
                 if not inside:
                     raise UserError("The selected part contains no complete note. Select a slightly longer part.")
                 e0 = max(0.0, min(r0, inside[0].start - 0.06))
-                nxt = [n.start for n in notes if n.start >= r1 - 0.05]
+                nxt = [n.start for n in notes if n.start >= r1 - 0.12]
                 e1 = min(r1, (nxt[0] - 0.015) if nxt else r1, len(bass) / ANALYSIS_SR)
-                e1 = max(e1, inside[-1].start + 0.1)
             else:
                 pool = [n for n in notes if r0 - 0.02 <= n.start < r1]
                 shifted = [RefNote(n.start - r0, n.end - r0, n.note, n.level_db, n.cents) for n in pool]

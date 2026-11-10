@@ -298,12 +298,6 @@ class HardwareDevice(Device):
             data = self.midi.receive_sysex(1.5)
         return data if data is not None and is_patch_dump(data) else None
 
-    def send_sysex(self, data: bytes) -> None:
-        if not is_patch_dump(data):
-            raise DeviceError("This is not a Bass Station II patch dump.")
-        with self._lock:
-            self.midi.send(list(data))
-
     # -- audio ---------------------------------------------------------------
     def _on_block(self, block: np.ndarray, t_first: float) -> None:
         if self._capturing:

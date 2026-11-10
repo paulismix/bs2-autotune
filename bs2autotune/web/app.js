@@ -158,6 +158,7 @@
       const dev = devices.audio_inputs.find((d) => d.name === s.audio_device);
       const n = dev ? dev.channels : Math.max(2, s.input_channel);
       fillSelect($('input-channel'), Array.from({ length: n }, (_, i) => ({ value: i + 1, label: `Input ${i + 1}` })), s.input_channel);
+      $('fw-features').checked = !!s.firmware_features;
       const problems = [devices.midi_error && `MIDI: ${devices.midi_error}`, devices.audio_error && `Audio: ${devices.audio_error}`].filter(Boolean);
       $('device-error').hidden = problems.length === 0;
       $('device-error').textContent = problems.join(' · ');
@@ -870,6 +871,10 @@
     setting('midi-channel', 'midi_channel', true);
     setting('audio-device', 'audio_device');
     setting('input-channel', 'input_channel', true);
+    $('fw-features').addEventListener('change', () => act(async () => {
+      await api('/api/settings', { firmware_features: $('fw-features').checked });
+      await refreshState();
+    }));
     $('btn-refresh').addEventListener('click', () => act(refreshDevices));
     $('btn-signal').addEventListener('click', () => act(async () => { $('signal-readout').textContent = 'Playing a test note …'; await api('/api/signal', {}); }));
     $('btn-calibrate').addEventListener('click', () => act(() => api('/api/calibrate', {})));

@@ -116,7 +116,7 @@ def _viterbi(cand_f, cand_c, n_cand, energy_ok, uv_cost, jump_cost, switch_cost)
                 if c >= 1e8:
                     continue
                 if p < n_c and s < n_c:
-                    d = abs(12.0 * math.log2(cand_f[t, s] / cand_f[t - 1, p]))
+                    d = abs(12.0 * np.log2(cand_f[t, s] / cand_f[t - 1, p]))
                     if d > 0.5:
                         c += jump_cost * (d if d < 12.0 else 12.0)
                 elif (p < n_c) != (s < n_c):
@@ -223,13 +223,55 @@ def _onset_strength(b_power: np.ndarray) -> np.ndarray:
     return flux
 
 
-def detect_onsets(b_power: np.ndarray, hop_s: float, sensitivity: float = 0.5) -> np.ndarray:
+def frame_periods(n_frames: int, hop_s: float, times: np.ndarray, f0: np.ndarray, reach: float = 0.1) -> np.ndarray:
+    """Length (in frames of ``hop_s``) of the longest pitch period heard near every frame."""
+    per = np.where(f0 > 0, 1.0 / np.maximum(f0, 1e-6), -1.0)
+    if len(per) < 2:
+        return np.full(n_frames, max(1, int(round(0.012 / hop_s))), dtype=np.int64)
+    hop_p = float(times[1] - times[0])
+    k = max(1, int(round(reach / hop_p)))
+    padded = np.concatenate([np.full(k, -1.0), per, np.full(k, -1.0)])
+    longest = np.lib.stride_tricks.sliding_window_view(padded, 2 * k + 1).max(axis=1)
+    idx = np.clip(np.round(np.arange(n_frames) * hop_s / hop_p).astype(np.int64), 0, len(longest) - 1)
+    out = longest[idx]
+    out = np.where(out > 0, out, 0.012)
+    return np.maximum(1, np.round(out / hop_s).astype(np.int64))
+
+
+def step_novelty(b_power: np.ndarray, periods: np.ndarray) -> np.ndarray:
+    """How much the spectrum rises at every frame once the ripple at the pitch
+    rate is averaged away (dB summed over the bands).
+
+    A short analysis window sees every single period of a low, bright note as a
+    click.  Averaged over exactly one period the level of a held note is
+    constant, so comparing the period before a frame with the period after it
+    responds to note starts only.
+    """
+    n, bands = b_power.shape
+    idx = np.arange(n)
+    c = np.concatenate([np.zeros((1, bands)), np.cumsum(b_power.astype(np.float64), axis=0)])
+    lo = np.clip(idx - periods + 1, 0, n)
+    s1 = (c[idx + 1] - c[lo]) / (idx + 1 - lo)[:, None]
+    c1 = np.concatenate([np.zeros((1, bands)), np.cumsum(s1, axis=0)])
+    hi = np.clip(idx + periods, 0, n)
+    smooth = (c1[hi] - c1[idx]) / (hi - idx)[:, None]
+    floor = float(b_power.max()) * 1e-6 + 1e-20
+    logp = np.log10(smooth + floor)
+    after = logp[np.clip(idx + periods, 0, n - 1)]
+    before = logp[np.clip(idx - periods, 0, n - 1)]
+    return 10.0 * np.maximum(after - before, 0.0).sum(axis=1)
+
+
+def detect_onsets(b_power: np.ndarray, hop_s: float, sensitivity: float = 0.5,
+                  periods: Optional[np.ndarray] = None) -> np.ndarray:
     """Times at which notes start.
 
     A note start is a broadband event: many bands rise together and the level
     jumps.  Beating between detuned oscillators and filter movement also make
     single bands rise, but far less - hence the two criteria.  ``sensitivity``
-    (0..1) trades missed re-triggers against false splits.
+    (0..1) trades missed re-triggers against false splits.  With ``periods``
+    (pitch period at every frame, in frames) the clicks of the single periods
+    of low bright notes are told apart from note starts.
     """
     flux = _onset_strength(b_power)
     env = 10.0 * np.log10(b_power.sum(axis=1) + 1e-20)
@@ -237,24 +279,46 @@ def detect_onsets(b_power: np.ndarray, hop_s: float, sensitivity: float = 0.5) -
     rise = np.zeros_like(env)
     for i in range(1, len(env)):
         rise[i] = env[i] - env[max(0, i - back):i].min()
-    peaks, _ = scipy.signal.find_peaks(flux, distance=max(1, int(round(0.07 / hop_s))))
-    if len(peaks) == 0:
+    apart = max(1, int(round(0.07 / hop_s)))
+    spaced, _ = scipy.signal.find_peaks(flux, distance=apart)
+    if len(spaced) == 0:
         return np.zeros(0)
-    heights = flux[peaks]
+    heights = flux[spaced]
     top = np.sort(heights)[-max(1, len(heights) // 4):]
     ref = float(np.median(top))  # a typical clear onset
     strong = 0.75 - 0.5 * sensitivity  # fraction of a clear onset that is accepted on its own
     weak = 0.3 - 0.2 * sensitivity
     need_rise = 20.0 - 12.0 * sensitivity
-    times = []
+    novelty = step_novelty(b_power, periods) if periods is not None else None
+    peaks, _ = scipy.signal.find_peaks(flux)
+    good = []
     for p in peaks:
-        # the level jump around the flux peak
-        jump = float(rise[max(0, p - 2):p + 4].max())
-        if flux[p] >= strong * ref or (flux[p] >= weak * ref and jump >= need_rise):
-            lo = max(0, p - int(round(0.03 / hop_s)))
-            seg = flux[lo:p + 1]
-            foot = lo + int(np.nonzero(seg >= 0.25 * flux[p])[0][0])
-            times.append(max(0.0, foot * hop_s))
+        jump = float(rise[max(0, p - 2):p + 4].max())  # the level jump around the flux peak
+        if not (flux[p] >= strong * ref or (flux[p] >= weak * ref and jump >= need_rise)):
+            continue
+        if novelty is not None and float(novelty[max(0, p - 5):p + 2].max()) < 0.07 * 10.0 * flux[p]:
+            continue  # one period of a held note, not a start
+        good.append(int(p))
+    # of several candidates close together one counts: the largest step of the
+    # period averaged spectrum (the first period of a note - the later periods
+    # can click louder), or simply the strongest when the pitch is unknown
+    if novelty is not None:
+        score = {q: (float(novelty[max(0, q - 2):q + 1].max()), float(flux[q])) for q in good}
+    else:
+        score = {q: (float(flux[q]), 0.0) for q in good}
+    chosen: List[int] = []
+    left = sorted(good, key=lambda q: score[q], reverse=True)
+    while left:
+        pick = left[0]
+        chosen.append(pick)
+        left = [q for q in left if abs(q - pick) >= apart]
+    times = []
+    for p in sorted(chosen):
+        foot = p
+        lo = max(0, p - int(round(0.03 / hop_s)))
+        while foot > lo and flux[foot - 1] >= 0.25 * flux[p]:
+            foot -= 1
+        times.append(max(0.0, foot * hop_s))
     return np.array(times)
 
 
@@ -267,7 +331,7 @@ def transcribe(y: np.ndarray, sr: int = ANALYSIS_SR, sensitivity: float = 0.4) -
     hop_b = cfg.hop_b / cfg.sr
     env = 10.0 * np.log10(feats.b.sum(axis=1) + 1e-20)
     env_peak = float(env.max())
-    onset_times = detect_onsets(feats.b, hop_b, sensitivity)
+    onset_times = detect_onsets(feats.b, hop_b, sensitivity, frame_periods(len(feats.b), hop_b, times, f0))
 
     midi = np.where(f0 > 0, 69.0 + 12.0 * np.log2(np.maximum(f0, 1e-6) / 440.0), np.nan)
     hop_p = times[1] - times[0] if len(times) > 1 else 0.01
@@ -298,24 +362,58 @@ def transcribe(y: np.ndarray, sr: int = ANALYSIS_SR, sensitivity: float = 0.4) -
         while j + 1 < n and voiced[j + 1]:
             j += 1
         # voiced run [i, j]; split inside it
-        cuts = [i]
         run_t0, run_t1 = times[i], times[j] + hop_p
-        for ot in onset_times:
-            if run_t0 + 0.04 < ot < run_t1 - 0.03:
-                cuts.append(int(round(ot / hop_p)))
-        m = i
+        onset_cuts = [int(round(ot / hop_p)) for ot in onset_times if run_t0 + 0.04 < ot < run_t1 - 0.03]
+        pitch_cuts = []
         ref = semis[i]
         count = 0
         for t in range(i + 1, j + 1):
             if abs(semis[t] - ref) > 0.7:
                 count += 1
                 if count >= 3:
-                    cuts.append(t - 2)
+                    pitch_cuts.append(t - 2)
                     ref = semis[t]
                     count = 0
             else:
                 count = 0
                 ref = 0.9 * ref + 0.1 * semis[t]
+        # a semitone played legato: the tracker sees a short glide between the two
+        # notes and the reference above follows it, so look for a step between
+        # two steady pitches as well (w frames each, 2 g frames apart)
+        w, g = 5, 3
+
+        def step_at(t: int) -> bool:
+            left, right = semis[t - g - w:t - g], semis[t + g:t + g + w]
+            ml, mr = float(np.median(left)), float(np.median(right))
+            return (abs(mr - ml) > 0.75 and float(np.median(np.abs(left - ml))) < 0.15
+                    and float(np.median(np.abs(right - mr))) < 0.15)
+
+        t = i + g + w
+        while t <= j - g - w + 1:
+            if step_at(t):
+                t1 = t
+                while t1 + 1 <= j - g - w + 1 and step_at(t1 + 1):
+                    t1 += 1
+                step = (t + t1 + 1) // 2
+                if not any(abs(pc - step) <= w + g for pc in pitch_cuts):
+                    pitch_cuts.append(step)
+                t = t1 + w
+            else:
+                t += 1
+        pitch_cuts.sort()
+        # the pitch tracker looks ahead and reports a new note up to 0.1 s before
+        # it starts: where an onset is close by, the onset is the boundary and
+        # the frames in between say nothing about the pitch of the note before
+        cuts = [i] + onset_cuts
+        ahead = {}  # onset cut -> frame at which the pitch had already changed
+        for pc in pitch_cuts:
+            near = [oc for oc in onset_cuts if pc - 4 <= oc <= pc + 10]
+            if not near:
+                cuts.append(pc)
+                continue
+            oc = min(near, key=lambda c: abs(c - pc))
+            if oc > pc:
+                ahead[oc] = min(pc, ahead.get(oc, pc))
         cuts = sorted(set(c for c in cuts if i <= c <= j))
         cuts.append(j + 1)
         merged = [cuts[0]]
@@ -325,7 +423,7 @@ def transcribe(y: np.ndarray, sr: int = ANALYSIS_SR, sensitivity: float = 0.4) -
         if merged[-1] != j + 1:
             merged[-1] = j + 1
         for a, b in zip(merged[:-1], merged[1:]):
-            seg = semis[a:b]
+            seg = semis[a:max(a, ahead.get(b, b))]
             seg = seg[np.isfinite(seg)]
             if len(seg) < 3:
                 continue
@@ -385,8 +483,19 @@ def transcribe(y: np.ndarray, sr: int = ANALYSIS_SR, sensitivity: float = 0.4) -
         seg = 10.0 * np.log10((csum[hi] - csum[lo]) / np.maximum(hi - lo, 1) + 1e-20)
         pitched = max(4, int(round(0.6 * (min(nt.end, nxt) - nt.start) / hop_b)))
         level = float(np.median(seg[:min(len(seg), pitched)]))
+        # the held part ends where the level falls 10 dB and stays there (a
+        # single louder moment further on belongs to whatever comes next)
         strong = np.nonzero(seg >= level - 10.0)[0]
-        held_end = (a + int(strong[-1]) + 1) * hop_b - 0.5 * half * hop_b - 0.006 if len(strong) else nt.end
+        if len(strong):
+            pause = max(6, 2 * half + 2)
+            last = int(strong[0])
+            for k in strong[1:]:
+                if k - last > pause:
+                    break
+                last = int(k)
+            held_end = (a + last + 1) * hop_b - 0.5 * half * hop_b - 0.006
+        else:
+            held_end = nt.end
         nt.end = float(min(max(held_end, nt.start + 0.03), nxt - 0.008))
         nt.level_db = level - 10.0 * math.log10(float(power.max()) + 1e-20)
         if nt.end - nt.start >= 0.035 and nt.level_db > -40.0:
