@@ -10,7 +10,7 @@ import numpy as np
 
 from . import engine
 from .engine import Phrase, Physics
-from .features import ANALYSIS_SR, Aligned, Features, Target, extract
+from .features import ANALYSIS_SR, Aligned, Features, Target, band_energy, extract
 
 # oscillator start phases of the renders that are averaged when a patch has
 # two free running sound sources (osc 1 + osc 2): relative phase 0, 1/3, 2/3
@@ -85,6 +85,7 @@ class Model:
             if self._eq_a is not None:
                 f.a *= self._eq_a
                 f.b *= self._eq_b
+                f.energy = band_energy(f.a, self.target.cfg)
             out.append(f)
         self.evaluations += 1
         return out

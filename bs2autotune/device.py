@@ -168,9 +168,10 @@ class VirtualDevice(Device):
             lo = biquad_shelf(self.sr, 95.0, 1.8, high=False)
             hi = biquad_shelf(self.sr, 5200.0, -3.5, high=True)
             lp = scipy.signal.butter(2, 17500.0, fs=self.sr)
-            self._eq = (lo, hi, lp)
+            dc = scipy.signal.butter(1, 14.0, btype="highpass", fs=self.sr)  # the output is AC coupled
+            self._eq = (lo, hi, lp, dc)
         y = y.astype(np.float64)
-        y = y + 0.08 * (y * y - float(np.mean(y * y)))  # a little asymmetry (even harmonics)
+        y = y + 0.08 * y * y  # a little asymmetry (even harmonics)
         for b, a in self._eq:
             y = scipy.signal.lfilter(b, a, y)
         return y

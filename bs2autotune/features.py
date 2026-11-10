@@ -377,17 +377,29 @@ class Features:
 
     a: np.ndarray  # tonal view (frames, bands)
     b: np.ndarray  # transient view
-    energy: float  # mean square of the waveform
+    energy: float  # mean power inside the analysed bands (used to match the loudness)
 
 
 def tonal_bank(cfg: FeatureConfig = DEFAULT_CONFIG) -> _Bank:
     return _banks(cfg)[0]
 
 
+def band_energy(a: np.ndarray, cfg: FeatureConfig = DEFAULT_CONFIG) -> float:
+    """Mean power of a sound inside the tonal bands.
+
+    The loudness of two sounds is matched on this number rather than on the
+    raw waveform, so that anything outside the analysed band (DC, rumble) and
+    any spectral correction applied to the bands is treated consistently.
+    """
+    widths = _banks(cfg)[0].length.astype(np.float64)
+    return float(np.mean(a.astype(np.float64) @ widths)) + 1e-20
+
+
 def extract(y: np.ndarray, cfg: FeatureConfig = DEFAULT_CONFIG) -> Features:
     y = np.asarray(y, dtype=np.float32)
     bank_a, bank_b = _banks(cfg)
-    return Features(bank_a.power(y), bank_b.power(y), float(np.mean(np.square(y, dtype=np.float64))) + 1e-20)
+    a = bank_a.power(y)
+    return Features(a, bank_b.power(y), band_energy(a, cfg))
 
 
 FeatureSet = Union[Features, Sequence[Features]]
@@ -590,7 +602,7 @@ class Target:
         a, b, e = self._db(mean)
         if shift is None:
             best = None
-            for s in range(-self.max_shift, self.max_shift + 1, 2):
+            for s in range(-self.max_shift, self.max_shift + 1):
                 parts = self._parts(a, b, e, s)
                 total = parts[0] * self.cfg.w_tonal + parts[1] * self.cfg.w_transient + parts[2] * self.cfg.w_envelope
                 if best is None or total < best[0] - 1e-9:

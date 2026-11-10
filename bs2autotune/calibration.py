@@ -111,6 +111,10 @@ class Calibrator:
         edges = 28.0 * 2.0 ** (np.arange(0, 56) / 6.0)
         self.band_edges = edges[edges < 0.45 * self.sr]
         self.band_freqs = np.sqrt(self.band_edges[:-1] * self.band_edges[1:])
+        # eight frequencies inside every band: the model response is averaged over
+        # the band exactly like the measurement (matters for narrow resonance peaks)
+        frac = (np.arange(8) + 0.5) / 8.0
+        self.dense = (self.band_edges[:-1, None] * (self.band_edges[1:, None] / self.band_edges[:-1, None]) ** frac)
 
     # -- helpers ----------------------------------------------------------------
     def _report(self, name: str, ok: bool = True, message: str = "", **data) -> None:
@@ -141,6 +145,15 @@ class Calibrator:
         at = np.interp(self.band_edges, f + 0.5 * (f[1] - f[0]), cum[1:])
         return np.maximum(np.diff(at), 1e-30)
 
+    def _model_db(self, ftype: int, slope: int, shape: int, fcs: np.ndarray, k: float, k2: float) -> np.ndarray:
+        """Band-averaged model response (dB) for an array of cutoffs -> (n_fc, n_bands)."""
+        out = np.empty((len(fcs), self.dense.shape[0]))
+        flat = self.dense.ravel()
+        for i, fc in enumerate(fcs):
+            h = filter_mag_db(flat, _FIT_SR, ftype, slope, shape, float(fc), k, k2, self.ph.acid_comp)
+            out[i] = 10.0 * np.log10(np.mean(10.0 ** (h.reshape(self.dense.shape) / 10.0), axis=1) + 1e-30)
+        return out
+
     def _fit(self, ratio_db: np.ndarray, valid: np.ndarray, bound_db: np.ndarray, ftype: int, slope: int,
              shape: int, k_grid: Sequence[float], k2: float, free_gain: bool) -> Tuple[float, float, float, float]:
         """Fit cutoff and resonance of the model filter to a measured response.
@@ -153,16 +166,35 @@ class Calibrator:
         censored = ~valid & np.isfinite(bound_db)
         if valid.sum() < 4:
             return best
-        fcs = 12.0 * 2.0 ** (np.arange(0, int(24 * math.log2(26000.0 / 12.0))) / 24.0)
+
+        def errors(fcs: np.ndarray, k: float):
+            h = self._model_db(ftype, slope, shape, fcs, k, k2)
+            gain = np.median(ratio_db[valid][None, :] - h[:, valid], axis=1) if free_gain else np.zeros(len(fcs))
+            err = np.mean(np.abs(ratio_db[valid][None, :] - h[:, valid] - gain[:, None]), axis=1)
+            if censored.any():
+                over = np.maximum(0.0, h[:, censored] + gain[:, None] - bound_db[censored][None, :])
+                err = err + over.sum(axis=1) / valid.sum()
+            return err, gain
+
+        coarse = 12.0 * 2.0 ** (np.arange(0, int(8 * math.log2(26000.0 / 12.0)) + 1) / 8.0)
         for k in k_grid:
-            for fc in fcs:
-                h = filter_mag_db(self.band_freqs, _FIT_SR, ftype, slope, shape, fc, k, k2, self.ph.acid_comp)
-                gain = float(np.median(ratio_db[valid] - h[valid])) if free_gain else 0.0
-                err = float(np.mean(np.abs(ratio_db[valid] - h[valid] - gain)))
-                if censored.any():
-                    err += float(np.sum(np.maximum(0.0, h[censored] + gain - bound_db[censored]))) / valid.sum()
-                if err < best[3]:
-                    best = (float(fc), float(k), gain, err)
+            err, gain = errors(coarse, k)
+            i = int(np.argmin(err))
+            if err[i] < best[3]:
+                best = (float(coarse[i]), float(k), float(gain[i]), float(err[i]))
+        # refine the cutoff (1/64 octave) and the resonance around the best grid point
+        ks = sorted(k_grid)
+        j = ks.index(best[1]) if best[1] in ks else 0
+        k_lo = ks[max(0, j - 1)]
+        k_hi = ks[min(len(ks) - 1, j + 1)]
+        fine_k = np.unique(np.concatenate([[best[1]], np.geomspace(max(k_lo, 1e-3), max(k_hi, 1e-3), 7)])) \
+            if ftype == 0 else np.unique(np.concatenate([[best[1]], np.linspace(k_lo, k_hi, 7)]))
+        fine_fc = best[0] * 2.0 ** (np.arange(-8, 9) / 64.0)
+        for k in fine_k:
+            err, gain = errors(fine_fc, float(k))
+            i = int(np.argmin(err))
+            if err[i] < best[3]:
+                best = (float(fine_fc[i]), float(k), float(gain[i]), float(err[i]))
         return best
 
     def _response(self, updates: Dict[str, int], note: int = FILTER_NOTE, hold: float = 0.4):
@@ -355,44 +387,46 @@ class Calibrator:
         self._report("Sustain level", ok, f"exponent {gamma:.2f}", gamma=gamma)
 
     def step_cutoff(self) -> None:
-        k_grid = [2.0, 1.7, 1.41, 1.2, 1.0, 0.85, 0.7, 0.55]
+        """Filter cutoff curve, resonance curve and the shape of the 24 dB mode."""
+        k0_grid = [2.0, 1.7, 1.41, 1.2, 1.0, 0.85, 0.7, 0.55]
+        kr_grid = list(2.0 * (0.012 / 2.0) ** (np.arange(30) / 29.0))
         raws = (25, 45, 65, 85, 105, 125, 145, 165, 185, 205, 225, 245)
-        meas = [(raw,) + self._response({"filter_freq": raw}) for raw in raws]
-        best_k2, best = None, None
-        for k2 in (2.0, 1.6, 1.3, 1.0, 0.8):
-            fits = [self._fit(r, v, b, 0, 1, 0, k_grid, k2, False) for _, r, v, b in meas]
-            mid = [f[3] for (raw, _, v, _), f in zip(meas, fits) if 60 <= raw <= 200 and v.sum() >= 6]
-            score = float(np.mean(mid)) if mid else float("inf")
+        res_raws = (30, 60, 85, 105, 120)
+        sweep = [(raw,) + self._response({"filter_freq": raw}) for raw in raws]
+        reso = [(raw,) + self._response({"filter_freq": 150, "filter_res": raw}) for raw in res_raws]
+        # the damping of the second (non-resonant) stage shapes every response:
+        # take the value that explains both sweeps best
+        best = None
+        for k2 in (2.0, 1.6, 1.3, 1.0, 0.8, 0.6):
+            fits = [self._fit(r, v, b, 0, 1, 0, k0_grid, k2, False) for _, r, v, b in sweep]
+            rfits = [self._fit(r, v, b, 0, 1, 0, kr_grid, k2, True) for _, r, v, b in reso]
+            errs = [f[3] for (raw, _, v, _), f in zip(sweep, fits) if 60 <= raw <= 200 and v.sum() >= 6]
+            errs += [f[3] for (_, _, v, _), f in zip(reso, rfits) if v.sum() >= 6]
+            score = float(np.mean(errs)) if errs else float("inf")
             if best is None or score < best[0]:
-                best, best_k2 = (score, fits), k2
-        fits = best[1]
+                best = (score, k2, fits, rfits)
+        score, k2, fits, rfits = best
         pts, ks = [], []
-        for (raw, r, v, b), (fc, k, _, err) in zip(meas, fits):
+        for (raw, r, v, b), (fc, k, _, err) in zip(sweep, fits):
             if v.sum() >= 6 and err < 6.0:
                 pts.append((raw, fc))
                 if 60 <= raw <= 200:
                     ks.append(k)
-        if len(pts) >= 4:
+        ok = len(pts) >= 4
+        if ok:
             self.ph.cutoff_classic = np.log2(_log_table(pts, 256, 4.0, 40000.0))
-            self.ph.damping_stage2 = float(best_k2)
-            self._k0 = float(np.median(ks)) if ks else 1.41
+            self.ph.damping_stage2 = float(k2)
             self.ph.track_ref_note = float(FILTER_NOTE)
             self.ph.calibrated["cutoff"] = True
-        self._cutoff_points = pts
-        self._report("Filter cutoff curve", len(pts) >= 4,
+        self._k0 = float(np.median(ks)) if ks else 1.41
+        self._reso_fits = [(raw, f) for (raw, _, v, _), f in zip(reso, rfits) if v.sum() >= 6 and f[3] < 6.0]
+        self._report("Filter cutoff curve", ok,
                      f"{len(pts)} points, {2 ** self.ph.cutoff_classic[64]:.0f} Hz at 64, "
                      f"{2 ** self.ph.cutoff_classic[128]:.0f} Hz at 128, {2 ** self.ph.cutoff_classic[192]:.0f} Hz at 192"
-                     if len(pts) >= 4 else "could not measure the filter (defaults kept)",
-                     points=pts, fit_error=best[0])
+                     if ok else "could not measure the filter (defaults kept)", points=pts, fit_error=score)
 
     def step_resonance(self) -> None:
-        k_grid = list(2.0 * (0.012 / 2.0) ** (np.arange(36) / 35.0))
-        pts = [(0, getattr(self, "_k0", 1.41))]
-        for raw in (30, 60, 85, 105, 120):
-            r, v, b = self._response({"filter_freq": 150, "filter_res": raw})
-            fc, k, gain, err = self._fit(r, v, b, 0, 1, 0, k_grid, self.ph.damping_stage2, True)
-            if v.sum() >= 6 and err < 6.0:
-                pts.append((raw, k))
+        pts = [(0, getattr(self, "_k0", 1.41))] + [(raw, f[1]) for raw, f in getattr(self, "_reso_fits", [])]
         if len(pts) >= 3:
             table = _log_table(pts, 128, 0.008, 2.0)
             self.ph.damping_classic = np.minimum.accumulate(table)
@@ -431,9 +465,9 @@ class Calibrator:
                      feedback=fb)
 
     def step_env_depth(self) -> None:
-        mod = {"mod_attack": 0, "mod_decay": 0, "mod_sustain": 127, "filter_freq": 60}
+        mod = {"mod_attack": 0, "mod_decay": 0, "mod_sustain": 127, "filter_freq": 40}
         pts = []
-        for depth in (0, 14, 28, 42):
+        for depth in (0, 10, 20, 30, 40):
             r, v, b = self._response(dict(mod, filter_env=64 + depth))
             fc, k, _, err = self._fit(r, v, b, 0, 1, 0, [getattr(self, "_k0", 1.41)], self.ph.damping_stage2, False)
             if v.sum() >= 6 and err < 6.0 and fc < 12000.0:
@@ -573,6 +607,88 @@ class Calibrator:
                      f"{self.ph.eq_db.min():+.1f} .. {self.ph.eq_db.max():+.1f} dB relative to the model",
                      freqs=[float(f) for f in self.ph.eq_freqs], db=[float(v) for v in self.ph.eq_db])
 
+    def step_character(self) -> None:
+        """Character of the instrument: what the tables cannot express.
+
+        A few typical sounds are recorded and a handful of model properties is
+        fitted so that the model reproduces them: how hard the mixer drives the
+        filter, how the filter saturates (which tames the resonance at high
+        levels), how strong overdrive and distortion are.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        from .features import Target, extract
+        from .model import Model
+        from .search import CMA
+
+        t0 = PRE
+        phrase = Phrase([Note(t0, t0 + 0.3, 36), Note(t0 + 0.35, t0 + 0.65, 43), Note(t0 + 0.7, t0 + 1.1, 31)],
+                        t0 + 1.25)
+        notes = [(n.start, n.end, n.note) for n in phrase.notes]
+        common = {"amp_release": 15}
+        patches = [
+            dict(common, filter_freq=110),
+            dict(common, filter_freq=110, filter_res=75),
+            dict(common, filter_freq=80, filter_res=40, filter_env=100, mod_decay=55, mod_sustain=20),
+            dict(common, filter_freq=110, filter_res=60, mix_osc2=255, osc2_fine=140, mix_sub=255, sub_wave=2),
+            dict(common, filter_type=1, filter_freq=120, filter_res=90, filter_env=90, mod_decay=50, mod_sustain=0),
+            dict(common, filter_freq=140, distortion=70),
+            dict(common, filter_freq=140, filter_drive=70),
+            dict(common, filter_slope=0, filter_freq=110, filter_res=75),
+        ]
+        patches = [dict(self.base, **p) for p in patches]
+        targets = []
+        for patch in patches:
+            y = self.dev.capture(patch, phrase)
+            targets.append(Target(y, notes=notes))
+
+        base = self.ph
+
+        def physics_for(x: np.ndarray) -> Physics:
+            x = np.clip(x, 0.0, 1.0)
+            ph = base.copy()
+            ph.filter_sat = float(2.0 * x[0])
+            ph.headroom = float(0.1 + 0.8 * x[1])
+            ph.dist_table = 1.0 + (base.dist_table - 1.0) * 10.0 ** (2.0 * x[2] - 1.0)
+            ph.drive_table = 1.0 + (base.drive_table - 1.0) * 10.0 ** (2.0 * x[3] - 1.0)
+            res = np.arange(128) / 127.0
+            ph.damping_classic = np.clip(base.damping_classic * np.exp(-(3.0 * x[4] - 1.0) * res), 0.008, 2.0)
+            ph.feedback_acid = np.clip(base.feedback_acid * (1.0 + (0.8 * x[5] - 0.3) * res), 0.0, 3.97)
+            return ph
+
+        def loss(x: np.ndarray) -> float:
+            ph = physics_for(x)
+            total = 0.0
+            for patch, target in zip(patches, targets):
+                m = Model(ph, phrase, target, workers=1)
+                total += target.compare(m.features(patch, realizations=1 if patch["mix_osc2"] == 0 else 2))["loss"]
+            return total / len(patches)
+
+        x0 = np.array([min(max(base.filter_sat / 2.0, 0.1), 0.9), (base.headroom - 0.1) / 0.8, 0.5, 0.5, 1.0 / 3.0,
+                       0.375])
+        before = loss(x0 * np.array([0.0, 1, 1, 1, 1, 1]) + np.array([base.filter_sat / 2.0, 0, 0, 0, 0, 0]))
+        cma = CMA(x0, 0.22, np.random.default_rng(3), lam=10)
+        best_x, best_l = x0, loss(x0)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for _ in range(22):
+                self.dev.check_cancel()
+                xs = cma.ask()
+                ls = np.array(list(pool.map(loss, xs)))
+                i = int(np.argmin(ls))
+                if ls[i] < best_l:
+                    best_x, best_l = np.clip(xs[i], 0.0, 1.0), float(ls[i])
+                cma.tell(ls + 2.0 * np.sum((xs - np.clip(xs, 0.0, 1.0)) ** 2, axis=1))
+        if best_l < before - 0.002:
+            fitted = physics_for(best_x)
+            for name in ("filter_sat", "headroom", "dist_table", "drive_table", "damping_classic", "feedback_acid"):
+                setattr(self.ph, name, getattr(fitted, name))
+            self.ph.calibrated["character"] = True
+        self._report("Character", True,
+                     f"model error on typical sounds {before:.3f} -> {min(best_l, before):.3f} "
+                     f"(filter saturation {self.ph.filter_sat:.2f}, mixer drive {self.ph.headroom:.2f})",
+                     before=before, after=min(best_l, before), filter_sat=self.ph.filter_sat,
+                     headroom=self.ph.headroom)
+
     def step_nrpn(self) -> None:
         """Do the NRPN controlled switches respond?  (waveform select is the important one)"""
         hold = 0.3
@@ -596,7 +712,7 @@ class Calibrator:
     def run(self, quick: bool = False) -> CalibrationResult:
         steps = [self.step_signal, self.step_tuning, self.step_nrpn, self.step_envelopes, self.step_sustain,
                  self.step_cutoff, self.step_resonance, self.step_env_depth, self.step_tracking, self.step_acid,
-                 self.step_levels, self.step_colour]
+                 self.step_levels, self.step_colour, self.step_character]
         if quick:
             steps = [self.step_signal, self.step_tuning, self.step_nrpn]
         self._total = len(steps)

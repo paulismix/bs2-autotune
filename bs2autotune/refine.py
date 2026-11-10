@@ -3,19 +3,28 @@
 The model search delivers a patch that sounds right *in the model*.  The real
 instrument differs from the model, so the patch is now corrected with real
 measurements.  Playing the phrase takes seconds, so every measurement has to
-count:
+count.
 
-* **Model-guided steps.**  A measurement yields a complete picture of the
-  sound (spectrogram, envelope ...), not just one number.  The difference
-  between that picture and what the model predicted for the same patch is the
-  model's error *at this point*.  Adding that error to the model's prediction
-  for nearby patches gives a corrected model; its best patch inside a trust
-  region is the next thing to measure.  This usually closes most of the gap
-  within a handful of measurements.
-* **Structure checks.**  The corrected model also proposes changes of the
-  switches (waveform, octave, filter mode ...); promising ones are measured.
-* **Direct search.**  When the model has nothing more to offer, single
-  controls are nudged and judged by measurement alone.
+**Model-guided steps (space mapping).**  A measurement yields a complete
+picture of the sound, not just one number.  For the current best patch ``p``
+two things are learned from it:
+
+1. *Parameter extraction* - which settings ``x`` make the **model** sound like
+   the recording of ``p``?  The difference ``x - p`` says how the instrument's
+   controls are shifted against the model's ("its cutoff 110 behaves like the
+   model's 121, its decays are a bit shorter ...").
+2. Whatever difference remains between the recording and the model at ``x``
+   is kept as a correction of the spectra.
+
+The corrected model - shifted controls plus spectral correction - reproduces
+the measurement exactly at ``p`` and predicts the neighbourhood far better
+than the raw model.  Its best patch inside a trust region is measured next.
+
+**Structure checks.**  The corrected model also proposes changes of the
+switches (waveform, octave, filter mode ...); promising ones are measured.
+
+**Direct search.**  When the model has nothing more to offer, single controls
+are nudged and judged by measurement alone.
 
 The oscillators run free, so repeated measurements of one patch differ a
 little; decisions take that noise into account.
@@ -24,7 +33,6 @@ little; decisions take that noise into account.
 from __future__ import annotations
 
 import math
-import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -59,6 +67,17 @@ class Measured:
 
 
 @dataclass
+class Mapping:
+    """The corrected model around one measured patch."""
+
+    centre: Dict[str, int]
+    shift: Dict[str, int]  # model control = instrument control + shift
+    corr: Aligned  # spectral difference that the shift does not explain
+    time_shift: int
+    fit: float  # how well the model could imitate the measurement
+
+
+@dataclass
 class RefineResult:
     patch: Dict[str, int]
     loss: float
@@ -68,6 +87,7 @@ class RefineResult:
     history: List[dict]
     start_loss: float
     noise: float
+    shift: Dict[str, int]
 
 
 class HardwareLoop:
@@ -89,6 +109,7 @@ class HardwareLoop:
         self.noise = 0.012  # standard deviation of repeated measurements (updated as we learn)
         self._noise_samples: List[float] = []
         self.best: Optional[Measured] = None
+        self.mapping: Optional[Mapping] = None
         self.phase = "start"
         self.clipped = False
 
@@ -111,13 +132,13 @@ class HardwareLoop:
         if m.n >= 2:
             self._noise_samples.append(float(np.std(m.losses, ddof=1)))
             self.noise = float(min(max(np.median(self._noise_samples), 0.004), 0.08))
-        improved = self.best is None or m.loss < self.best.loss
+        best = min(m.loss, self.best.loss) if self.best is not None else m.loss
         self.history.append({"play": self.plays, "loss": cmp_["loss"], "mean": m.loss, "phase": self.phase,
-                             "note": note, "best": min(m.loss, self.best.loss) if self.best else m.loss})
+                             "note": note, "best": best})
         if self.progress is not None:
-            self.progress({"phase": self.phase, "play": self.plays, "loss": cmp_["loss"],
-                           "best": self.best.loss if self.best else m.loss, "note": note,
-                           "leader": self.best.patch if self.best else patch})
+            leader = self.best.patch if self.best is not None and self.best.loss <= m.loss else patch
+            self.progress({"phase": self.phase, "play": self.plays, "loss": cmp_["loss"], "best": best,
+                           "note": note, "leader": leader})
         return m
 
     def better(self, cand: Measured, ref: Measured, z: float = 0.8) -> Optional[bool]:
@@ -132,6 +153,8 @@ class HardwareLoop:
 
     def challenge(self, patch: Dict[str, int], note: str, max_repeats: int = 3) -> bool:
         """Measure a candidate against the current best; adopt it when it is better."""
+        if Objective.key(patch) == Objective.key(self.best.patch):
+            return False
         cand = self.measure(patch, note)
         verdict = self.better(cand, self.best)
         while verdict is None and cand.n < max_repeats and not self.should_stop():
@@ -148,90 +171,106 @@ class HardwareLoop:
         return bool(verdict)
 
     # -- the corrected model ------------------------------------------------------
-    def _correction(self, m: Measured) -> Tuple[Aligned, int]:
-        """What has to be added to the model's prediction at m.patch to get the measurement."""
-        self.model.set_precision(fine=True)
-        feats = self.model.features(m.patch)
-        shift = self.target.compare(feats)["shift"]
-        model_al = self.target.aligned(feats, shift)
-        hw_al = self.target.aligned(m.feats)
-        return hw_al.minus(model_al), shift
+    @staticmethod
+    def _shifted(patch: Dict[str, int], shift: Dict[str, int]) -> Dict[str, int]:
+        out = dict(patch)
+        for key, d in shift.items():
+            lo, hi = _RANGES.get(key, (PARAMS[key].lo, PARAMS[key].hi))
+            out[key] = int(min(max(patch[key] + d, lo), hi))
+        return out
 
-    def _corrected_objective(self, corr: Aligned, shift: int, centre: Dict[str, int], radius: float) -> Objective:
-        keys = [d for d in continuous_dims(structure_of_patch(centre))]
+    def build_mapping(self, m: Measured, gens: int = 10) -> Mapping:
+        """Parameter extraction + residual correction for a measured patch."""
+        self.model.set_precision(fine=True)
+        hw_target = Target(m.audio, self.target.cfg, notes=self.target.notes,
+                           band_reliability=self.target.reliability_hz)
+        hw_model = self.model.with_target(hw_target)
+        obj = Objective(lambda patches: hw_model.map(hw_model.loss, patches))
+        opt = PatchOptimizer(obj, int(self.rng.integers(1 << 30)), None, self.should_stop)
+        keys = [d.key for d in continuous_dims(structure_of_patch(m.patch))]
+        starts = [dict(m.patch)]
+        if self.mapping is not None:
+            prev = {k: v for k, v in self.mapping.shift.items() if k in keys}
+            starts.append(self._shifted(m.patch, prev))
+        losses = obj(starts)
+        i = int(np.argmin(losses))
+        x, fit = opt.polish(starts[i], float(losses[i]), keys, 0.07, gens, lam=12)
+        shift = {k: int(x[k] - m.patch[k]) for k in keys}
+        feats = self.model.features(x)
+        time_shift = self.target.compare(feats)["shift"]
+        corr = self.target.aligned(m.feats).minus(self.target.aligned(feats, time_shift))
+        return Mapping(dict(m.patch), shift, corr, time_shift, fit)
+
+    def _surrogate(self, mapping: Mapping, radius: float) -> Objective:
+        centre = mapping.centre
+        dims = continuous_dims(structure_of_patch(centre))
 
         def penalty(patch: Dict[str, int]) -> float:
             # gentle preference for staying close to the measured point
             d = 0.0
-            for dim in keys:
-                span = float(dim.hi - dim.lo)
-                d += ((patch[dim.key] - centre[dim.key]) / span) ** 2
-            return complexity_penalty(patch) + 0.01 * d / max(radius * radius, 1e-6) / max(len(keys), 1)
+            for dim in dims:
+                d += ((patch[dim.key] - centre[dim.key]) / float(dim.hi - dim.lo)) ** 2
+            return complexity_penalty(patch) + 0.01 * d / max(radius * radius, 1e-6) / max(len(dims), 1)
 
-        def batch(patches: List[Dict[str, int]]) -> List[float]:
-            return self.model.map(
-                lambda p: self.target.loss_aligned(self.target.aligned(self.model.features(p), shift), corr), patches)
+        def one(patch: Dict[str, int]) -> float:
+            feats = self.model.features(self._shifted(patch, mapping.shift))
+            return self.target.loss_aligned(self.target.aligned(feats, mapping.time_shift), mapping.corr)
 
-        return Objective(batch, penalty)
+        return Objective(lambda patches: self.model.map(one, patches), penalty)
 
     def _trust_bounds(self, centre: Dict[str, int], radius: float) -> Dict[str, Tuple[int, int]]:
         bounds = {}
         for dim in continuous_dims(structure_of_patch(centre)):
-            span = dim.hi - dim.lo
-            r = max(1, int(round(radius * span)))
+            r = max(1, int(round(radius * (dim.hi - dim.lo))))
             bounds[dim.key] = (max(dim.lo, centre[dim.key] - r), min(dim.hi, centre[dim.key] + r))
         return bounds
 
-    def propose(self, radius: float, gens: int = 10) -> Tuple[Dict[str, int], float, float]:
-        """Best patch of the corrected model inside the trust region around the current best."""
-        centre = self.best.patch
-        corr, shift = self._correction(self.best)
-        obj = self._corrected_objective(corr, shift, centre, radius)
+    def propose(self, radius: float, gens: int = 10) -> Tuple[Dict[str, int], float]:
+        """Best patch of the corrected model inside the trust region; returns (patch, predicted gain)."""
+        mapping = self.mapping
+        obj = self._surrogate(mapping, radius)
         opt = PatchOptimizer(obj, int(self.rng.integers(1 << 30)), None, self.should_stop, frozen=self.frozen)
-        base = obj.one(centre)
-        keys = opt.active_keys(centre)
-        patch, loss = opt.polish(centre, base, keys, 0.35, gens, lam=12,
-                                 bounds=self._trust_bounds(centre, radius))
-        return patch, base, loss
+        base = obj.one(mapping.centre)
+        patch, loss = opt.polish(mapping.centre, base, opt.active_keys(mapping.centre), 0.35, gens, lam=12,
+                                 bounds=self._trust_bounds(mapping.centre, radius))
+        return patch, base - loss
 
     def propose_structure(self) -> Optional[Tuple[Dict[str, int], float]]:
         """Let the corrected model try the switches; returns (patch, predicted gain) or None."""
-        centre = self.best.patch
-        corr, shift = self._correction(self.best)
-        obj = self._corrected_objective(corr, shift, centre, 0.3)
+        mapping = self.mapping
+        centre = mapping.centre
+        obj = self._surrogate(mapping, 0.3)
         opt = PatchOptimizer(obj, int(self.rng.integers(1 << 30)), None, self.should_stop, frozen=self.frozen)
         base = obj.one(centre)
         patch, loss = centre, base
-        for block in (opt.block_osc1, opt.block_sub, opt.block_osc2):
+        for block in (opt.block_osc1, opt.block_sub, opt.block_osc2, opt.block_filter, opt.block_extras):
             patch, loss = block(patch, loss, 0.3)
-        patch, loss = opt.block_filter(patch, loss, 0.3)
-        patch, loss = opt.block_extras(patch, loss, 0.3)
-        if structure_key(structure_of_patch(patch)) == structure_key(structure_of_patch(centre)) and \
-                all(patch[k] == centre[k] for k in ("filter_drive", "distortion", "mix_noise", "filter_track")):
+        same = structure_key(structure_of_patch(patch)) == structure_key(structure_of_patch(centre)) and all(
+            patch[k] == centre[k] for k in ("filter_drive", "distortion", "mix_noise", "filter_track"))
+        if same:
             return None
         return clean_patch(patch), base - loss
 
     # -- direct search --------------------------------------------------------------
     def direct_search(self, budget: int) -> None:
         """Nudge single controls; keep what measurably helps."""
+        if budget <= 0:
+            return
         self.phase = "fine tuning"
         start_plays = self.plays
         dims = [d for d in continuous_dims(structure_of_patch(self.best.patch)) if d.key not in self.frozen]
-        steps = {d.key: max(1.0, 0.04 * (d.hi - d.lo)) for d in dims}
+        steps = {d.key: max(1.0, 0.03 * (d.hi - d.lo)) for d in dims}
         # most influential controls first, according to the model
         self.model.set_precision(fine=True)
         centre = self.best.patch
+        base_al = self.target.aligned(self.model.features(centre))
         probes = []
         for d in dims:
             for sign in (-1, 1):
                 v = int(min(max(centre[d.key] + sign * steps[d.key], d.lo), d.hi))
                 probes.append(dict(centre, **{d.key: v}))
-        base_feats = self.model.features(centre)
-        base_al = self.target.aligned(base_feats)
-        sens = {}
         vals = self.model.map(lambda p: self._model_distance(p, base_al), probes)
-        for i, d in enumerate(dims):
-            sens[d.key] = max(vals[2 * i], vals[2 * i + 1])
+        sens = {d.key: max(vals[2 * i], vals[2 * i + 1]) for i, d in enumerate(dims)}
         order = sorted(dims, key=lambda d: -sens[d.key])
         direction = {d.key: 1 for d in dims}
         while self.plays - start_plays < budget and not self.should_stop():
@@ -267,9 +306,8 @@ class HardwareLoop:
     # -- the loop -----------------------------------------------------------------
     def run(self, candidates: List[Dict[str, int]], budget: int = 60) -> RefineResult:
         """Refine starting from the model's candidates; ``budget`` is the number of plays."""
-        t0 = time.time()
         self.phase = "candidates"
-        firsts = []
+        firsts: List[Measured] = []
         for i, cand in enumerate(candidates[:4]):
             if self.should_stop() and firsts:
                 break
@@ -278,51 +316,57 @@ class HardwareLoop:
                 self.best = firsts[-1]
         start_loss = self.best.loss
         self.measure(self.best.patch, "re-check best")
-        # a second opinion on the runner-up if it is close
         firsts.sort(key=lambda m: m.loss)
-        for m in firsts[:2]:
-            if m is not self.best and m.loss < self.best.loss + 2.0 * self.noise:
+        for m in firsts[:2]:  # a second opinion on a close runner-up
+            if m is not self.best and m.loss < self.best.loss + 2.0 * self.noise and not self.should_stop():
                 self.measure(m.patch, "re-check runner-up")
                 if m.loss < self.best.loss:
                     self.best = m
 
-        radius = 0.12
+        radius = 0.15
         fails = 0
         iteration = 0
         structure_tried = set()
         self.phase = "model-guided"
-        reserve = max(6, int(0.3 * budget))  # plays kept for the final direct search
+        reserve = max(4, int(0.2 * budget))  # plays kept for the final direct search
+        mapped_for: Optional[tuple] = None
         while self.plays < budget - reserve and not self.should_stop():
             iteration += 1
-            patch, base, predicted = self.propose(radius)
-            gain = base - predicted
-            if Objective.key(patch) == Objective.key(self.best.patch) or gain < 0.2 * self.noise:
+            key = Objective.key(self.best.patch)
+            if mapped_for != key:
+                self.mapping = self.build_mapping(self.best)
+                mapped_for = key
+            patch, gain = self.propose(radius)
+            if Objective.key(patch) == key or gain < 0.15 * self.noise:
                 fails += 1
                 radius *= 0.6
+            elif self.challenge(patch, f"model step (radius {radius:.2f}, predicted -{gain:.3f})"):
+                radius = min(0.3, radius * 1.3)
+                fails = 0
             else:
-                if self.challenge(patch, f"model step (radius {radius:.2f}, predicted -{gain:.3f})"):
-                    radius = min(0.3, radius * 1.4)
-                    fails = 0
-                else:
-                    radius *= 0.55
-                    fails += 1
-            if iteration in (2, 6) or (fails >= 2 and iteration > 2 and len(structure_tried) < 3):
-                key = structure_key(structure_of_patch(self.best.patch))
-                if (key, iteration // 4) not in structure_tried and not self.should_stop():
-                    structure_tried.add((key, iteration // 4))
+                radius *= 0.55
+                fails += 1
+            if (iteration in (2, 6) or fails >= 2) and not self.should_stop():
+                skey = (structure_key(structure_of_patch(self.best.patch)), Objective.key(self.best.patch))
+                if skey not in structure_tried and self.plays < budget - reserve:
+                    structure_tried.add(skey)
+                    if mapped_for != Objective.key(self.best.patch):
+                        self.mapping = self.build_mapping(self.best)
+                        mapped_for = Objective.key(self.best.patch)
                     self.phase = "structure check"
                     prop = self.propose_structure()
                     if prop is not None and prop[1] > max(0.01, self.noise):
                         if self.challenge(prop[0], f"switches: {describe_structure(prop[0])}"):
-                            radius = 0.12
+                            radius = 0.15
                             fails = 0
                     self.phase = "model-guided"
             if radius < 0.012 or fails >= 4:
                 break
         if not self.should_stop():
-            self.direct_search(max(0, budget - self.plays))
+            self.direct_search(budget - self.plays)
         if self.best.n < 2 and not self.should_stop():
             self.measure(self.best.patch, "final check")
         self.dev.set_patch(self.best.patch)
+        shift = dict(self.mapping.shift) if self.mapping is not None else {}
         return RefineResult(dict(self.best.patch), self.best.loss, dict(self.best.parts or {}),
-                            self.best.audio, self.plays, list(self.history), start_loss, self.noise)
+                            self.best.audio, self.plays, list(self.history), start_loss, self.noise, shift)
