@@ -113,9 +113,10 @@ selected) a `.syx` backup.
   .venv/bin/python -m pip install demucs      # large download; model weights are fetched on first use
   ```
 
-  Without Demucs the built-in fallback keeps only the low end (below roughly 400 Hz) and matches that part of
-  the spectrum. It finds most of the notes and the body of the sound, but it cannot judge the brightness, and
-  kick drums stay in the picture. Where the song has a bar or two of bass on its own, select that instead.
+  Without Demucs the built-in fallback keeps only the low end (below roughly 400 Hz). That is a stopgap, not
+  an alternative: it cannot judge the brightness of the sound and it cannot remove the kick drum, so with
+  drums playing some notes come out wrong and the match is rough at best. Where the song has a bar or two of
+  bass on its own, select that and choose *An isolated bass line* instead.
 * **Choose a passage with several different notes, short and long.** Short notes reveal the attack and the
   filter envelope, long ones the sustained tone, different pitches the filter's key tracking.
 * **Tune the patch to the recording** (checkbox in step 2) if you want to play along with the original:

@@ -126,10 +126,11 @@ def separate_builtin(data: np.ndarray, sr: int, progress: Optional[Callable[[str
     bass = scipy.signal.sosfiltfilt(sos, x).astype(np.float32) if len(x) > 64 else x.astype(np.float32)
     weight = np.interp(np.log2(_REL_FREQS), np.log2([20.0, 200.0, 260.0, 330.0, 420.0, 520.0, 16000.0]),
                        [1.0, 1.0, 0.7, 0.35, 0.12, 0.04, 0.04])
-    note = ("The bass was isolated with the built-in method, which only hears the low end (below about 400 Hz): "
-            "the brightness of the patch cannot be judged from a full mix this way, and kick drums stay in. "
-            "Install Demucs (pip install demucs) for a far better result, or use a passage where the bass "
-            "plays alone.")
+    note = ("The bass was isolated with the built-in method, which only hears the low end (below about 400 Hz) "
+            "and cannot remove the kick drum: check the notes below, and expect a rough match at best - the "
+            "brightness of the sound cannot be judged this way. For complete songs install Demucs "
+            "(.venv/bin/python -m pip install demucs, then start the app again), or select a passage where "
+            "the bass plays alone.")
     return Separation(bass, np.stack([_REL_FREQS, weight], axis=1), "builtin", note)
 
 

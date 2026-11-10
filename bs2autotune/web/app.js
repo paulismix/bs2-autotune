@@ -226,7 +226,7 @@
     $('btn-analyse').textContent = sel ? 'Analyse the selection' : (an ? 'Analyse again' : 'Analyse');
     let preNote = '';
     if (ui.kind === 'mix' && devices && !devices.demucs) {
-      preNote = 'Demucs is not installed, so the bass will be isolated with the built-in method, which only hears the low end of a mix. For complete songs install Demucs (pip install demucs) or choose a passage where the bass plays alone.';
+      preNote = 'Demucs is not installed. The built-in method only hears the low end of a mix and cannot remove the kick drum: with drums playing, expect some wrong notes and a rough match at best. For complete songs install Demucs (.venv/bin/python -m pip install demucs, then start the app again), or select a passage where the bass plays alone and choose "An isolated bass line".';
     }
     const note = (an && an.note) || preNote;
     $('sep-note').hidden = !note;
