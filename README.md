@@ -117,6 +117,10 @@ selected) a `.syx` backup.
   an alternative: it cannot judge the brightness of the sound and it cannot remove the kick drum, so with
   drums playing some notes come out wrong and the match is rough at best. Where the song has a bar or two of
   bass on its own, select that and choose *An isolated bass line* instead.
+* **The cleaner the bass, the better the patch.** In tests with a simulated band, drums and chords leaking
+  into the bass stem 20 dB down cost little (distance 0.13 instead of 0.10); at 14 dB down the notes were
+  still right but the match became rough (0.27). If a separated song gives a poor result, listen to the
+  excerpt in step 2 - what you hear besides the bass is what the app tries to imitate, too.
 * **Choose a passage with several different notes, short and long.** Short notes reveal the attack and the
   filter envelope, long ones the sustained tone, different pitches the filter's key tracking.
 * **Tune the patch to the recording** (checkbox in step 2) if you want to play along with the original:
