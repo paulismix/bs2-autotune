@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BS2 Autotune</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <img src="/favicon.svg" alt="" width="28" height="28">
+    <div>
+      <h1>BS2 Autotune</h1>
+      <p>Sound matching for the Novation Bass Station II</p>
+    </div>
+  </div>
+  <div class="top-status">
+    <span class="chip" id="mode-chip"></span>
+    <span class="chip chip-busy" id="job-chip" hidden></span>
+  </div>
+</header>
+
+<main>
+  <div class="banner" id="banner" role="alert" hidden></div>
+
+  <!-- 1 ------------------------------------------------------------------ -->
+  <section class="card" id="step-connect">
+    <header class="card-head">
+      <span class="step-no">1</span>
+      <h2>Connect</h2>
+      <span class="status" id="connect-status"></span>
+    </header>
+    <div class="card-body">
+      <div class="row">
+        <div class="seg" role="radiogroup" aria-label="Instrument">
+          <button type="button" role="radio" data-mode="hardware">Bass Station II</button>
+          <button type="button" role="radio" data-mode="demo">Demo (virtual synth)</button>
+        </div>
+        <p class="hint" id="mode-hint"></p>
+      </div>
+
+      <div id="hardware-fields">
+        <div class="grid-fields">
+          <label>MIDI output (to the synth)<select id="midi-out"></select></label>
+          <label>MIDI channel<select id="midi-channel"></select></label>
+          <label>Audio input (from the synth)<select id="audio-device"></select></label>
+          <label>Input channel<select id="input-channel"></select></label>
+          <label>MIDI input <span class="opt">optional, for patch backup</span><select id="midi-in"></select></label>
+        </div>
+        <p class="warn-text" id="device-error" hidden></p>
+        <details class="tips">
+          <summary>Before you start</summary>
+          <ul>
+            <li>Connect the Bass Station II by USB and its line output to an input of your audio interface (line level, no instrument or mic gain stage, no effects).</li>
+            <li>Load an initialised patch on the synth, so that settings which cannot be reached over MIDI are neutral. Keep the mod wheel down.</li>
+            <li>Turn the volume of the synth up to about three quarters. The signal test below tells you if the level is right.</li>
+            <li>macOS asks for microphone access the first time: allow it for the app that runs this program (Terminal).</li>
+            <li>The app changes the patch that is being edited on the synth. Stored patches are not touched; you decide whether to save.</li>
+          </ul>
+        </details>
+      </div>
+
+      <div class="actions">
+        <button type="button" class="btn" id="btn-refresh">Refresh devices</button>
+        <button type="button" class="btn" id="btn-signal">Test signal</button>
+        <span class="readout" id="signal-readout"></span>
+      </div>
+
+      <div class="sub">
+        <div class="sub-head">
+          <h3>Calibration</h3>
+          <span class="status" id="cal-status"></span>
+          <button type="button" class="btn btn-primary" id="btn-calibrate">Calibrate</button>
+        </div>
+        <p class="hint">Plays about a hundred short test notes (roughly a minute and a half) and measures how this unit responds: latency, tuning, filter and envelope curves, levels. Needed once; repeat it when you change the audio interface or its gain.</p>
+        <ol class="steps" id="cal-steps"></ol>
+        <div class="charts" id="cal-charts" hidden>
+          <figure class="chart" id="chart-cutoff"></figure>
+          <figure class="chart" id="chart-env"></figure>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2 ------------------------------------------------------------------ -->
+  <section class="card" id="step-reference">
+    <header class="card-head">
+      <span class="step-no">2</span>
+      <h2>Reference</h2>
+      <span class="status" id="ref-status"></span>
+    </header>
+    <div class="card-body">
+      <div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose a reference recording">
+        <strong>Drop an audio file here</strong> or click to choose
+        <span>A bass line on its own works best. A complete song works too.</span>
+        <input type="file" id="file" accept="audio/*,.wav,.aif,.aiff,.flac,.mp3,.m4a,.ogg" hidden>
+      </div>
+
+      <div id="ref-loaded" hidden>
+        <div class="file-line"><strong id="ref-name"></strong><span id="ref-meta"></span></div>
+        <div class="wave-wrap">
+          <canvas id="wave" height="130" aria-label="Waveform of the reference. Drag to select a part."></canvas>
+        </div>
+        <p class="hint" id="wave-hint">Drag over the waveform to choose a part. A selection up to 8 seconds is used exactly as selected; from a longer one (or the whole file) the app picks a suitable passage itself.</p>
+
+        <div class="row wrap">
+          <div>
+            <span class="label">The recording is</span>
+            <div class="seg" role="radiogroup" aria-label="Kind of recording" id="ref-kind">
+              <button type="button" role="radio" data-kind="stem">An isolated bass line</button>
+              <button type="button" role="radio" data-kind="mix">A full mix</button>
+            </div>
+          </div>
+          <label id="sep-field" hidden>Bass isolation
+            <select id="sep-method">
+              <option value="auto">Best available</option>
+              <option value="demucs">Demucs</option>
+              <option value="builtin">Built-in (low end only)</option>
+            </select>
+          </label>
+          <label>Note splitting
+            <input type="range" id="sensitivity" min="0" max="1" step="0.05" value="0.4">
+            <span class="opt">fewer notes &larr; &rarr; more notes</span>
+          </label>
+          <button type="button" class="btn btn-primary" id="btn-analyse">Analyse</button>
+        </div>
+        <p class="warn-text" id="sep-note" hidden></p>
+
+        <div id="analysis" hidden>
+          <div class="stats" id="analysis-stats"></div>
+          <div class="roll-wrap"><canvas id="roll" height="150" aria-label="Notes that the synth will play"></canvas></div>
+          <div class="player-line">
+            <span class="label">Listen to the excerpt</span>
+            <audio id="excerpt-audio" controls preload="none"></audio>
+          </div>
+          <label class="check"><input type="checkbox" id="keep-tuning"> <span id="keep-tuning-label">Tune the patch to the recording</span></label>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3 ------------------------------------------------------------------ -->
+  <section class="card" id="step-match">
+    <header class="card-head">
+      <span class="step-no">3</span>
+      <h2>Match</h2>
+      <span class="status" id="match-status"></span>
+    </header>
+    <div class="card-body">
+      <div class="row wrap">
+        <div>
+          <span class="label">Effort</span>
+          <div class="seg" role="radiogroup" aria-label="Effort" id="effort"></div>
+        </div>
+        <button type="button" class="btn btn-primary btn-big" id="btn-match">Start matching</button>
+        <button type="button" class="btn btn-danger" id="btn-stop" hidden>Stop</button>
+      </div>
+      <p class="hint" id="match-hint"></p>
+
+      <div id="progress" hidden>
+        <ol class="stages" id="stages">
+          <li data-stage="prepare">Preparing</li>
+          <li data-stage="model">Model search</li>
+          <li data-stage="refine">Refining on the synth</li>
+          <li data-stage="done">Done</li>
+        </ol>
+        <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="bar"><span></span></div>
+        <p class="progress-msg" id="progress-msg" aria-live="polite"></p>
+        <figure class="chart" id="chart-history" hidden></figure>
+        <details class="log"><summary>Details</summary><pre id="log"></pre></details>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4 ------------------------------------------------------------------ -->
+  <section class="card" id="step-result">
+    <header class="card-head">
+      <span class="step-no">4</span>
+      <h2>Result</h2>
+      <span class="status" id="result-status"></span>
+    </header>
+    <div class="card-body">
+      <p class="empty" id="result-empty">The matched patch appears here.</p>
+      <div id="result" hidden>
+        <div class="hero">
+          <div class="hero-num"><span id="hero-value"></span><small>distance</small></div>
+          <div class="hero-text">
+            <strong id="hero-quality"></strong>
+            <span id="hero-detail"></span>
+          </div>
+        </div>
+        <p class="warn-text" id="result-warn" hidden></p>
+
+        <div class="ab">
+          <div class="ab-col">
+            <span class="label">Reference</span>
+            <audio id="audio-ref" controls preload="none"></audio>
+            <canvas class="spec" id="spec-ref" aria-label="Spectrogram of the reference"></canvas>
+          </div>
+          <div class="ab-col">
+            <span class="label">Bass Station II with the matched patch</span>
+            <audio id="audio-syn" controls preload="none"></audio>
+            <canvas class="spec" id="spec-syn" aria-label="Spectrogram of the synth"></canvas>
+          </div>
+        </div>
+        <div class="scale"><span>quiet</span><i id="scale-ramp"></i><span>loud</span><span class="scale-note">Spectrograms: time left to right, 16 Hz at the bottom to 15 kHz at the top</span></div>
+
+        <div class="actions">
+          <button type="button" class="btn btn-primary" id="btn-send">Send to the synth</button>
+          <button type="button" class="btn" id="btn-play">Play the phrase</button>
+          <a class="btn" id="dl-txt" download>Patch sheet (.txt)</a>
+          <a class="btn" id="dl-json" download>Data (.json)</a>
+          <a class="btn" id="dl-syx" download hidden>SysEx (.syx)</a>
+          <audio id="audition-audio" controls preload="none" hidden></audio>
+        </div>
+        <p class="hint">The patch is now in the edit buffer of the synth. To keep it, press <strong>Save</strong> on the Bass Station II and choose a slot.</p>
+
+        <div class="sheet-head">
+          <h3>Patch</h3>
+          <span class="status" id="sheet-structure"></span>
+          <label class="check"><input type="checkbox" id="only-changed" checked> Only what differs from an initialised patch</label>
+        </div>
+        <div class="sheet" id="sheet"></div>
+
+        <div class="save-line">
+          <label>Save to the library as <input type="text" id="save-name" maxlength="40" placeholder="Name"></label>
+          <button type="button" class="btn" id="btn-save">Save</button>
+        </div>
+      </div>
+
+      <div class="sub" id="library-box" hidden>
+        <div class="sub-head"><h3>Library</h3></div>
+        <table class="table" id="library">
+          <thead><tr><th>Name</th><th>Sound</th><th class="num">Distance</th><th>Saved</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <span id="version"></span>
+  <span>Runs on this computer only (127.0.0.1). Novation and Bass Station are trade marks of Focusrite Audio Engineering Ltd.; this is an independent tool.</span>
+</footer>
+
+<div class="tooltip" id="tooltip" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>

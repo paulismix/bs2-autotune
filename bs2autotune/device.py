@@ -183,6 +183,7 @@ class VirtualDevice(Device):
             dc = scipy.signal.butter(1, 14.0, btype="highpass", fs=self.sr)  # the output is AC coupled
             self._eq = (lo, hi, lp, dc)
         y = y.astype(np.float64)
+        y = 1.6 * np.tanh(y / 1.6)  # the output stage cannot swing beyond its supply
         y = y + 0.08 * y * y  # a little asymmetry (even harmonics)
         for b, a in self._eq:
             y = scipy.signal.lfilter(b, a, y)

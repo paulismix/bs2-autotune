@@ -141,7 +141,7 @@ class App:
         self.calibration: Dict[str, Optional[dict]] = {"hardware": None, "demo": None}
         self._load_calibrations()
         self.ref: Optional[dict] = None  # the loaded reference and its analysis
-        self.result: Optional[dict] = None
+        self.result: Optional[dict] = self._last_result()
         self._demo_device: Optional[VirtualDevice] = None
         self.version = __version__
 
@@ -161,6 +161,18 @@ class App:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=1)
         os.replace(tmp, self.path(name))
+
+    def _last_result(self) -> Optional[dict]:
+        """The result of the most recent session (shown again after a restart)."""
+        try:
+            sessions = sorted(d for d in os.listdir(self.path("sessions")) if re.fullmatch(r"\d{8}-\d{6}", d))
+        except OSError:
+            return None
+        for sid in reversed(sessions):
+            data = self._read_json(os.path.join("sessions", sid, "result.json"))
+            if data and "patch" in data and data.get("id") == sid:
+                return data
+        return None
 
     # --------------------------------------------------------------- settings
     def _load_settings(self) -> None:
@@ -274,8 +286,8 @@ class App:
                 "peak_db": round(cal.get("peak_db", 0.0), 1), "noise_db": round(cal.get("noise_db", 0.0), 1),
                 "tune_cents": round(cal.get("tune_cents", 0.0), 1), "steps": cal.get("steps", []),
                 "warnings": cal.get("warnings", []), "device": cal.get("device", {}),
-                "cutoff": [[i, round(2.0 ** ph["cutoff_classic"][i], 1)] for i in idx],
-                "cutoff_acid": [[i, round(2.0 ** ph["cutoff_acid"][i], 1)] for i in idx],
+                "cutoff": [[i, round(min(2.0 ** ph["cutoff_classic"][i], 22000.0), 1)] for i in idx],
+                "cutoff_acid": [[i, round(min(2.0 ** ph["cutoff_acid"][i], 22000.0), 1)] for i in idx],
                 "attack": [[i, round(ph["attack_table"][i], 5)] for i in range(0, 128, 3)],
                 "decay": [[i, round(ph["decay_table"][i], 5)] for i in range(0, 128, 3)],
                 "release": [[i, round(ph["release_table"][i], 5)] for i in range(0, 128, 3)]}

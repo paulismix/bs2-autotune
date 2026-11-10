@@ -248,6 +248,9 @@ class Calibrator:
         ok = True
         if self.result.peak_db > -1.0:
             ok, msg = False, msg + " - the input is clipping, turn the input gain down"
+        elif self.result.peak_db > -7.0:
+            ok, msg = False, msg + (" - too hot: patches with resonance or overdrive are louder than this test "
+                                    "tone and would clip; aim for a peak around -12 dBFS")
         elif self.result.peak_db < -40.0:
             ok, msg = False, msg + " - the level is very low, turn the synth volume or the input gain up"
         self._report("Signal and latency", ok, msg, latency_ms=latency * 1000.0, peak_db=self.result.peak_db,

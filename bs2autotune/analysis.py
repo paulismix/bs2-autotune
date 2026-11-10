@@ -360,25 +360,39 @@ def transcribe(y: np.ndarray, sr: int = ANALYSIS_SR, sensitivity: float = 0.4) -
                     continue
         merged_notes.append(nt)
 
-    # refine starts to the detected onsets, find the end of the held part, measure levels
-    out: List[RefNote] = []
-    for idx, nt in enumerate(merged_notes):
+    # refine all starts to the detected onsets first (the pitch tracker needs a
+    # few periods before it reports a new note, the onset detector does not)
+    for nt in merged_notes:
         near = onset_times[(onset_times > nt.start - 0.06) & (onset_times < nt.start + 0.05)]
         if len(near):
             nt.start = float(near[np.argmin(np.abs(near - nt.start))])
+    # then find where the held part of every note ends, and its level
+    power = feats.b.sum(axis=1).astype(np.float64)
+    csum = np.concatenate([[0.0], np.cumsum(power)])
+    out: List[RefNote] = []
+    for idx, nt in enumerate(merged_notes):
         nxt = merged_notes[idx + 1].start if idx + 1 < len(merged_notes) else len(env) * hop_b
         a = int(max(0, round(nt.start / hop_b)))
-        b = int(min(len(env), round(min(nt.end + 0.25, nxt) / hop_b)))
+        b = int(min(len(env), round(min(nt.end + 0.25, nxt - 0.012) / hop_b)))
         if b - a < 4:
             continue
-        seg = env[a:b]
-        level = float(np.median(seg[: max(4, int(0.6 * (b - a)))]))
+        # level averaged over one period of the note: no ripple at the pitch rate
+        period = 1.0 / (440.0 * 2.0 ** ((nt.note - 69) / 12.0))
+        half = max(1, int(round(0.5 * period / hop_b)))
+        idxs = np.arange(a, b)
+        lo = np.clip(idxs - half, 0, len(power))
+        hi = np.clip(idxs + half + 1, 0, len(power))
+        seg = 10.0 * np.log10((csum[hi] - csum[lo]) / np.maximum(hi - lo, 1) + 1e-20)
+        pitched = max(4, int(round(0.6 * (min(nt.end, nxt) - nt.start) / hop_b)))
+        level = float(np.median(seg[:min(len(seg), pitched)]))
         strong = np.nonzero(seg >= level - 10.0)[0]
-        held_end = (a + int(strong[-1]) + 1) * hop_b if len(strong) else nt.end
+        held_end = (a + int(strong[-1]) + 1) * hop_b - 0.5 * half * hop_b - 0.006 if len(strong) else nt.end
         nt.end = float(min(max(held_end, nt.start + 0.03), nxt - 0.008))
-        nt.level_db = level - env_peak
+        nt.level_db = level - 10.0 * math.log10(float(power.max()) + 1e-20)
         if nt.end - nt.start >= 0.035 and nt.level_db > -40.0:
             out.append(nt)
+    for nt in out:  # the analysis windows see an onset a few milliseconds early
+        nt.start = float(nt.start + 0.003)
     info = {"tuning_cents": 100.0 * tuning, "onsets": [float(t) for t in onset_times]}
     return out, info
 
