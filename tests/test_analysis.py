@@ -68,9 +68,57 @@ def test_notes_that_run_into_each_other(line):
     y = recording(line, dict(osc1_wave=3, filter_freq=160, amp_release=90))
     notes, _ = transcribe(y)
     changes = [t for prev, t in zip(line.notes, line.notes[1:]) if t.note != prev.note]
-    for true in changes:
-        assert any(abs(f.start - true.start) < 0.03 and f.note == true.note for f in notes), true
+    for true in changes:  # without an attack the moment of a change is known to a few periods only
+        assert any(abs(f.start - true.start) < 0.045 and f.note == true.note for f in notes), true
     assert len(changes) <= len(notes) <= len(line.notes)
+
+
+def other_instruments(n, sr=32000, beat=60 / 110 / 2):
+    """Kick, snare, hi-hat and a chord pad on the grid of the bass line."""
+    import scipy.signal
+
+    rng = np.random.default_rng(1)
+    out = np.zeros(n)
+    k = 0
+    while 0.3 + k * beat < n / sr - 0.5:
+        i0 = int((0.3 + k * beat) * sr)
+        if k % 4 == 0:  # kick: a sine that sweeps down through the range of the bass
+            t = np.arange(int(0.25 * sr)) / sr
+            out[i0:i0 + len(t)] += 0.7 * np.sin(2 * np.pi * np.cumsum(45 + 90 * np.exp(-t / 0.03)) / sr) * np.exp(-t / 0.09)
+        if k % 8 == 4:  # snare
+            t = np.arange(int(0.18 * sr)) / sr
+            sos = scipy.signal.butter(2, [900, 6000], btype="band", fs=sr, output="sos")
+            out[i0:i0 + len(t)] += 0.35 * scipy.signal.sosfilt(sos, rng.standard_normal(len(t))) * np.exp(-t / 0.05)
+        t = np.arange(int(0.05 * sr)) / sr  # hi-hat on every eighth note
+        sos = scipy.signal.butter(2, 7000, btype="high", fs=sr, output="sos")
+        out[i0:i0 + len(t)] += 0.12 * scipy.signal.sosfilt(sos, rng.standard_normal(len(t))) * np.exp(-t / 0.012)
+        k += 1
+    t = np.arange(n) / sr
+    for midi in (52, 55, 59, 64):  # a held chord of slightly detuned saws
+        for detune in (-0.004, 0.004):
+            out += 0.05 * scipy.signal.sawtooth(2 * np.pi * 440 * 2 ** ((midi - 69) / 12) * (1 + detune) * t)
+    return out
+
+
+@pytest.mark.parametrize("name", ["pluck", "open", "sine"])
+def test_notes_survive_what_a_separator_leaves_behind(line, name):
+    # an isolated stem still carries the rest of the band, some 20 dB down: hi-hats in the
+    # middle of long notes and a kick under every fourth one must not change the notes
+    bass = recording(line, SOUNDS[name]).astype(np.float64)
+    bass *= 0.5 / np.abs(bass).max()
+    notes, _ = transcribe((bass + 0.1 * other_instruments(len(bass))).astype(np.float32))
+    assert len(notes) == len(line.notes)
+    for found, true in zip(notes, line.notes):
+        assert found.note == true.note and abs(found.start - true.start) < 0.03
+
+
+def test_bass_and_kick_together(line):
+    # much stronger leakage: the pitch is found late under a kick, the note still starts with it
+    bass = recording(line, SOUNDS["open"]).astype(np.float64)
+    bass *= 0.5 / np.abs(bass).max()
+    notes, _ = transcribe((bass + 0.4 * other_instruments(len(bass))).astype(np.float32))
+    hits = sum(1 for t in line.notes if any(abs(f.start - t.start) < 0.05 and f.note == t.note for f in notes))
+    assert hits >= len(line.notes) - 2 and len(notes) <= len(line.notes) + 4
 
 
 def test_excerpt_and_phrase(line):

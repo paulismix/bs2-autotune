@@ -5,10 +5,9 @@ Two methods:
 * **Demucs** (optional, ``pip install demucs``): a neural source separation
   model.  By far the better result - recommended whenever the reference is a
   complete song.
-* **Built-in**: no extra software.  Drums are reduced with harmonic/percussive
-  separation and only the low end (where the bass dominates a mix) is kept.
-  Everything above is marked as not trustworthy (see ``reliability``), so the
-  brightness of the patch cannot be judged this way.
+* **Built-in**: no extra software.  Only the low end (where the bass dominates
+  a mix) is kept.  Everything above is marked as not trustworthy (see
+  ``reliability``), so the brightness of the patch cannot be judged this way.
 
 Both return the bass at the analysis sample rate and a curve that tells the
 matching how much each frequency region can be trusted.
@@ -20,7 +19,6 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 import numpy as np
-import scipy.ndimage
 import scipy.signal
 
 from .audio_util import resample
@@ -111,35 +109,27 @@ def separate_demucs(data: np.ndarray, sr: int, progress: Optional[Callable[[str]
 
 
 def separate_builtin(data: np.ndarray, sr: int, progress: Optional[Callable[[str], None]] = None) -> Separation:
-    """Low end of the mix with the drums reduced.
+    """The low end of the mix.
 
     Without a trained separation model the bass can only be told apart from
-    the rest where it dominates: below a few hundred hertz.  Short broadband
-    events (kick, snare) are reduced with harmonic/percussive separation, the
-    result is low-passed and everything above is marked as not trustworthy.
+    the rest where it dominates: below a few hundred hertz.  A steep low-pass
+    keeps that part; everything above is marked as not trustworthy.  (Reducing
+    the drums with harmonic/percussive separation was tried and dropped: the
+    holes it leaves in the bass under every kick did more harm to the note
+    detection than the kick itself.)
     """
     mono = data.mean(axis=1) if data.ndim == 2 else data
     x = resample(mono.astype(np.float32), sr, ANALYSIS_SR).astype(np.float64)
-    fs = ANALYSIS_SR
-    n_fft, hop = 2048, 256
-    if progress:
-        progress("reducing drums")
-    f, t, Z = scipy.signal.stft(x, fs, nperseg=n_fft, noverlap=n_fft - hop, window="hann")
-    mag = np.abs(Z)
-    # harmonic = steady over ~100 ms, percussive = smooth over ~300 Hz
-    harm = scipy.ndimage.median_filter(mag, size=(1, 13))
-    perc = scipy.ndimage.median_filter(mag, size=(19, 1))
-    mask_h = harm ** 2 / (harm ** 2 + perc ** 2 + 1e-12)
     if progress:
         progress("keeping the low end")
-    split = 1.0 / (1.0 + (f / 420.0) ** 8)  # steep low-pass around 420 Hz
-    _, bass = scipy.signal.istft(Z * mask_h * split[:, None], fs, nperseg=n_fft, noverlap=n_fft - hop, window="hann")
-    bass = bass[:len(x)].astype(np.float32)
+    sos = scipy.signal.butter(8, 420.0, fs=ANALYSIS_SR, output="sos")
+    bass = scipy.signal.sosfiltfilt(sos, x).astype(np.float32) if len(x) > 64 else x.astype(np.float32)
     weight = np.interp(np.log2(_REL_FREQS), np.log2([20.0, 200.0, 260.0, 330.0, 420.0, 520.0, 16000.0]),
                        [1.0, 1.0, 0.7, 0.35, 0.12, 0.04, 0.04])
     note = ("The bass was isolated with the built-in method, which only hears the low end (below about 400 Hz): "
-            "the brightness of the patch cannot be judged from a full mix this way. Install Demucs "
-            "(pip install demucs) for a far better result, or use a passage where the bass plays alone.")
+            "the brightness of the patch cannot be judged from a full mix this way, and kick drums stay in. "
+            "Install Demucs (pip install demucs) for a far better result, or use a passage where the bass "
+            "plays alone.")
     return Separation(bass, np.stack([_REL_FREQS, weight], axis=1), "builtin", note)
 
 

@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
+import scipy.ndimage
 import scipy.signal
 from numba import njit
 
@@ -212,14 +213,27 @@ class RefNote:
         return [round(self.start, 4), round(self.end, 4), int(self.note), round(self.level_db, 1)]
 
 
-def _onset_strength(b_power: np.ndarray) -> np.ndarray:
-    """Spectral flux of the transient view (4 ms frames)."""
-    floor = float(b_power.max()) * 1e-6 + 1e-20
-    logp = np.log10(b_power + floor)
+def _local_floor(b_power: np.ndarray, hop_s: float, depth_db: float = 35.0, reach: float = 0.06) -> np.ndarray:
+    """Per frame, the power below which a band does not count: ``depth_db`` below
+    the loudest moment nearby.
+
+    Without it a hi-hat that leaks into the bass at -30 dB would count like a
+    note start, because it makes otherwise empty bands rise by tens of decibels.
+    """
+    total = b_power.sum(axis=1).astype(np.float64)
+    k = max(1, int(round(reach / hop_s)))
+    local = scipy.ndimage.maximum_filter1d(total, size=2 * k + 1, mode="nearest")
+    return local * 10.0 ** (-depth_db / 10.0) + float(b_power.max()) * 1e-6 + 1e-20
+
+
+def _onset_strength(b_power: np.ndarray, hop_s: float = 0.004) -> np.ndarray:
+    """Spectral flux of the transient view (4 ms frames): rise of the bands that matter, in log10 units."""
+    floor = _local_floor(b_power, hop_s)[:, None]
     lag = 3
-    flux = np.zeros(len(logp))
-    d = np.maximum(logp[lag:] - logp[:-lag], 0.0)
-    flux[lag:] = d.sum(axis=1)
+    flux = np.zeros(len(b_power))
+    after = np.log10(b_power[lag:] + floor[lag:])
+    before = np.log10(b_power[:-lag] + floor[lag:])
+    flux[lag:] = np.maximum(after - before, 0.0).sum(axis=1)
     return flux
 
 
@@ -238,7 +252,7 @@ def frame_periods(n_frames: int, hop_s: float, times: np.ndarray, f0: np.ndarray
     return np.maximum(1, np.round(out / hop_s).astype(np.int64))
 
 
-def step_novelty(b_power: np.ndarray, periods: np.ndarray) -> np.ndarray:
+def step_novelty(b_power: np.ndarray, periods: np.ndarray, hop_s: float = 0.004) -> np.ndarray:
     """How much the spectrum rises at every frame once the ripple at the pitch
     rate is averaged away (dB summed over the bands).
 
@@ -255,49 +269,83 @@ def step_novelty(b_power: np.ndarray, periods: np.ndarray) -> np.ndarray:
     c1 = np.concatenate([np.zeros((1, bands)), np.cumsum(s1, axis=0)])
     hi = np.clip(idx + periods, 0, n)
     smooth = (c1[hi] - c1[idx]) / (hi - idx)[:, None]
-    floor = float(b_power.max()) * 1e-6 + 1e-20
-    logp = np.log10(smooth + floor)
-    after = logp[np.clip(idx + periods, 0, n - 1)]
-    before = logp[np.clip(idx - periods, 0, n - 1)]
+    floor = _local_floor(b_power, hop_s)[:, None]
+    after = np.log10(smooth[np.clip(idx + periods, 0, n - 1)] + floor)
+    before = np.log10(smooth[np.clip(idx - periods, 0, n - 1)] + floor)
     return 10.0 * np.maximum(after - before, 0.0).sum(axis=1)
 
 
 def detect_onsets(b_power: np.ndarray, hop_s: float, sensitivity: float = 0.5,
-                  periods: Optional[np.ndarray] = None) -> np.ndarray:
+                  periods: Optional[np.ndarray] = None, novelty: Optional[np.ndarray] = None) -> np.ndarray:
     """Times at which notes start.
 
     A note start is a broadband event: many bands rise together and the level
-    jumps.  Beating between detuned oscillators and filter movement also make
-    single bands rise, but far less - hence the two criteria.  ``sensitivity``
-    (0..1) trades missed re-triggers against false splits.  With ``periods``
-    (pitch period at every frame, in frames) the clicks of the single periods
-    of low bright notes are told apart from note starts.
+    jumps.  Three things imitate it and are told apart here:
+
+    * beating between detuned oscillators and filter sweeps make bands rise
+      too, but without the level jump of a start;
+    * a short analysis window sees every single period of a low, bright note
+      as a click - with ``periods`` (the pitch period at every frame, in
+      frames) levels and spectra are averaged over one period, where a held
+      note stands still;
+    * what leaks in from other instruments (see ``_local_floor``).
+
+    ``sensitivity`` (0..1) trades missed re-triggers against false splits.
     """
-    flux = _onset_strength(b_power)
-    env = 10.0 * np.log10(b_power.sum(axis=1) + 1e-20)
+    flux = _onset_strength(b_power, hop_s)
+    total = b_power.sum(axis=1).astype(np.float64)
+    n_frames = len(total)
+    if periods is not None:
+        # level averaged over one period: the gaps between the clicks of a low
+        # note must not look like rests
+        c = np.concatenate([[0.0], np.cumsum(total)])
+        idx = np.arange(n_frames)
+        lo = np.clip(idx - periods // 2, 0, n_frames)
+        hi = np.clip(idx + (periods + 1) // 2, lo + 1, n_frames)
+        total = (c[hi] - c[lo]) / (hi - lo)
+    env = 10.0 * np.log10(total + 1e-20)
     back = max(2, int(round(0.032 / hop_s)))
     rise = np.zeros_like(env)
-    for i in range(1, len(env)):
+    for i in range(1, n_frames):
         rise[i] = env[i] - env[max(0, i - back):i].min()
     apart = max(1, int(round(0.07 / hop_s)))
     spaced, _ = scipy.signal.find_peaks(flux, distance=apart)
     if len(spaced) == 0:
         return np.zeros(0)
-    heights = flux[spaced]
-    top = np.sort(heights)[-max(1, len(heights) // 4):]
-    ref = float(np.median(top))  # a typical clear onset
-    strong = 0.75 - 0.5 * sensitivity  # fraction of a clear onset that is accepted on its own
+
+    def jump_at(p: int) -> float:  # the level jump around a flux peak
+        late = int(periods[p]) // 2 if periods is not None else 0
+        return float(rise[max(0, p - 2):p + 4 + late].max())
+
+    clear = spaced[np.argsort(flux[spaced])[-max(1, len(spaced) // 4):]]  # the clearest onsets of this recording
+    ref = float(np.median(flux[clear]))
+    ref_jump = float(np.median([jump_at(int(p)) for p in clear]))
+    # a peak counts when it is nearly as strong as a clear onset and comes with a
+    # fair part of the usual level jump (beating has the strength but not the
+    # jump), or when it is weaker but the level jumps a lot
+    strong = 0.75 - 0.5 * sensitivity
     weak = 0.3 - 0.2 * sensitivity
     need_rise = 20.0 - 12.0 * sensitivity
-    novelty = step_novelty(b_power, periods) if periods is not None else None
+    part = 0.6 - 0.5 * sensitivity
+    if periods is None:
+        novelty = None
+    elif novelty is None:
+        novelty = step_novelty(b_power, periods, hop_s)
     peaks, _ = scipy.signal.find_peaks(flux)
     good = []
     for p in peaks:
-        jump = float(rise[max(0, p - 2):p + 4].max())  # the level jump around the flux peak
-        if not (flux[p] >= strong * ref or (flux[p] >= weak * ref and jump >= need_rise)):
+        jump = jump_at(int(p))
+        if not ((flux[p] >= strong * ref and jump >= part * ref_jump) or (flux[p] >= weak * ref and jump >= need_rise)):
             continue
-        if novelty is not None and float(novelty[max(0, p - 5):p + 2].max()) < 0.07 * 10.0 * flux[p]:
-            continue  # one period of a held note, not a start
+        if novelty is not None:
+            # one period of a held note, not a start: nothing changes once the
+            # ripple is averaged away, or very little and the period before
+            # clicked just as loud
+            ratio = float(novelty[max(0, p - 5):p + 2].max()) / (10.0 * flux[p] + 1e-12)
+            n = int(periods[p])
+            before = flux[max(0, p - n - 1):max(0, p - n + 2)]
+            if ratio < 0.07 or (ratio < 0.2 and n >= 3 and len(before) and float(before.max()) >= 0.8 * flux[p]):
+                continue
         good.append(int(p))
     # of several candidates close together one counts: the largest step of the
     # period averaged spectrum (the first period of a note - the later periods
@@ -330,7 +378,9 @@ def transcribe(y: np.ndarray, sr: int = ANALYSIS_SR, sensitivity: float = 0.4) -
     feats = extract(y, cfg)
     hop_b = cfg.hop_b / cfg.sr
     env = 10.0 * np.log10(feats.b.sum(axis=1) + 1e-20)
-    onset_times = detect_onsets(feats.b, hop_b, sensitivity, frame_periods(len(feats.b), hop_b, times, f0))
+    periods = frame_periods(len(feats.b), hop_b, times, f0)
+    novelty = step_novelty(feats.b, periods, hop_b)
+    onset_times = detect_onsets(feats.b, hop_b, sensitivity, periods, novelty)
 
     midi = np.where(f0 > 0, 69.0 + 12.0 * np.log2(np.maximum(f0, 1e-6) / 440.0), np.nan)
     hop_p = times[1] - times[0] if len(times) > 1 else 0.01
@@ -459,10 +509,23 @@ def transcribe(y: np.ndarray, sr: int = ANALYSIS_SR, sensitivity: float = 0.4) -
 
     # refine all starts to the detected onsets first (the pitch tracker needs a
     # few periods before it reports a new note, the onset detector does not)
+    floor_at = 0.0
     for nt in merged_notes:
-        near = onset_times[(onset_times > nt.start - 0.06) & (onset_times < nt.start + 0.05)]
+        pitched = nt.start
+        near = onset_times[(onset_times > pitched - 0.06) & (onset_times < pitched + 0.05)]
         if len(near):
-            nt.start = float(near[np.argmin(np.abs(near - nt.start))])
+            nt.start = float(near[np.argmin(np.abs(near - pitched))])
+        else:
+            # under a drum hit the tracker finds the pitch late: the note began at
+            # the onset before, if the sound never stopped in between
+            earlier = onset_times[(onset_times > max(pitched - 0.18, floor_at)) & (onset_times <= pitched - 0.06)]
+            if len(earlier):
+                t = float(earlier[-1])
+                a, b = int(round(t / hop_b)) + 3, int(round(pitched / hop_b))
+                c = min(len(env), b + max(4, int(round(0.08 / hop_b))))
+                if b > a and c > b and float(env[a:b].min()) >= float(np.median(env[b:c])) - 12.0:
+                    nt.start = t
+        floor_at = nt.start + 0.06  # the next note cannot claim this one's onset
     # then find where the held part of every note ends, and its level
     power = feats.b.sum(axis=1).astype(np.float64)
     csum = np.concatenate([[0.0], np.cumsum(power)])
@@ -499,8 +562,13 @@ def transcribe(y: np.ndarray, sr: int = ANALYSIS_SR, sensitivity: float = 0.4) -
         nt.level_db = level - 10.0 * math.log10(float(power.max()) + 1e-20)
         if nt.end - nt.start >= 0.035 and nt.level_db > -40.0:
             out.append(nt)
-    for nt in out:  # the analysis windows see an onset a few milliseconds early
-        nt.start = float(nt.start + 0.003)
+    if out:
+        # far quieter than the line itself: what is left of other instruments in
+        # the rests, not a bass note
+        typical = float(np.median([nt.level_db for nt in out]))
+        out = [nt for nt in out if nt.level_db >= typical - 15.0]
+    for nt in out:  # the analysis windows see an onset a little early
+        nt.start = float(nt.start + 0.001)
     info = {"tuning_cents": 100.0 * tuning, "onsets": [float(t) for t in onset_times]}
     return out, info
 
