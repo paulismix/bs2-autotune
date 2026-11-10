@@ -635,6 +635,10 @@ class Physics:
     # output stage
     out_hp_hz: float = 12.0
     out_gain: float = 1.0
+    # static colouring of the instrument's output relative to the model: gain in dB
+    # at the frequencies of eq_freqs (applied to the model's spectra, not its audio)
+    eq_freqs: np.ndarray = field(default_factory=lambda: 20.0 * 2.0 ** (np.arange(30) / 3.0))
+    eq_db: np.ndarray = field(default_factory=lambda: np.zeros(30))
     # bookkeeping
     calibrated: Dict[str, bool] = field(default_factory=dict)
 

@@ -42,7 +42,24 @@ class Model:
         self._on, self._off, self._note = phrase.arrays(float(sr))
         self.workers = workers or max(1, min(8, (os.cpu_count() or 2)))
         self._pool: Optional[ThreadPoolExecutor] = None
+        self._owns_pool = True
         self.evaluations = 0
+        self._eq_a: Optional[np.ndarray] = None
+        self._eq_b: Optional[np.ndarray] = None
+        if target is not None and np.any(np.abs(physics.eq_db) > 0.05):
+            logf = np.log2(physics.eq_freqs)
+            self._eq_a = (10.0 ** (np.interp(np.log2(target.centers_a), logf, physics.eq_db) / 10.0)).astype(np.float32)
+            self._eq_b = (10.0 ** (np.interp(np.log2(target.centers_b), logf, physics.eq_db) / 10.0)).astype(np.float32)
+
+    def with_target(self, target: Target) -> "Model":
+        """The same model (and worker pool) compared against another target."""
+        other = Model(self.physics, self.phrase, target, self.sr, self.realizations, self.workers)
+        other.single_realizations = self.single_realizations
+        if self.workers > 1 and self._pool is None:
+            self._pool = ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="bs2model")
+        other._pool = self._pool
+        other._owns_pool = False
+        return other
 
     # -- rendering -----------------------------------------------------------
     def render(self, patch: Dict[str, int], realization: int = 0, seed: int = 1) -> np.ndarray:
@@ -64,7 +81,11 @@ class Model:
         out = []
         for r in range(k):
             y = self.render(patch, r)
-            out.append(extract(y, cfg) if cfg is not None else extract(y))
+            f = extract(y, cfg) if cfg is not None else extract(y)
+            if self._eq_a is not None:
+                f.a *= self._eq_a
+                f.b *= self._eq_b
+            out.append(f)
         self.evaluations += 1
         return out
 
@@ -96,6 +117,6 @@ class Model:
         return np.asarray(self.map(self.loss, list(patches)), dtype=np.float64)
 
     def close(self) -> None:
-        if self._pool is not None:
+        if self._pool is not None and self._owns_pool:
             self._pool.shutdown(wait=False)
-            self._pool = None
+        self._pool = None

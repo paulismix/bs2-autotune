@@ -439,12 +439,24 @@ class PatchOptimizer:
         return patch, loss
 
     def polish(self, patch: Dict[str, int], loss: float, keys: Sequence[str], sigma: float, gens: int,
-               lam: Optional[int] = None):
-        """Joint CMA-ES refinement of several continuous controls around the patch."""
+               lam: Optional[int] = None, bounds: Optional[Dict[str, Tuple[int, int]]] = None):
+        """Joint CMA-ES refinement of several continuous controls around the patch.
+
+        ``bounds`` optionally narrows the range of individual controls (a trust region).
+        """
         keys = [k for k in keys if k not in self.frozen]
         if len(keys) < 2 or self.should_stop():
             return patch, loss
-        bounds = [_RANGES.get(k, (PARAMS[k].lo, PARAMS[k].hi)) for k in keys]
+        full = [_RANGES.get(k, (PARAMS[k].lo, PARAMS[k].hi)) for k in keys]
+        if bounds:
+            full = [(max(lo, bounds[k][0]), min(hi, bounds[k][1])) if k in bounds else (lo, hi)
+                    for k, (lo, hi) in zip(keys, full)]
+            keep = [i for i, (lo, hi) in enumerate(full) if hi > lo]
+            keys = [keys[i] for i in keep]
+            full = [full[i] for i in keep]
+            if len(keys) < 2:
+                return patch, loss
+        bounds = full
         x0 = np.array([(min(max(patch[k], lo), hi) - lo) / float(hi - lo) for k, (lo, hi) in zip(keys, bounds)])
         cma = CMA(x0, sigma, self.rng, lam=lam)
         best_patch, best_loss = patch, loss

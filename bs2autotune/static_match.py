@@ -162,6 +162,7 @@ class StaticMatcher:
         self.w_band = w / w.sum() / 10.0  # weighted mean, in units of 10 dB
         self.profiles = build_profiles(target)
         self.note = self.profiles[0].note if self.profiles else 40.0
+        self.eq = 10.0 ** (np.interp(np.log2(self.freqs), np.log2(physics.eq_freqs), physics.eq_db) / 10.0)
         self.n = int(round((_NOTE_LEN + 0.02) * sr))
         self.skip = int(round(_SKIP * sr))
         self._on = np.array([0], dtype=np.int64)
@@ -185,7 +186,7 @@ class StaticMatcher:
             engine._render_kernel(out, self._on, self._off, np.array([note], dtype=np.float64), P)
             power = self.bank.mean_power(out[self.skip:]).astype(np.float64)
             acc = power if acc is None else acc + power
-        return acc / k
+        return acc / k * self.eq
 
     def _distance(self, cand_db: np.ndarray, prof: StaticProfile) -> float:
         strong = prof.ref_db > prof.floor + 8.0

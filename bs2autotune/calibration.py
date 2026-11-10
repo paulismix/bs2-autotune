@@ -533,6 +533,46 @@ class Calibrator:
                      gamma=gamma, wave_gain=list(self.ph.wave_gain), sub_gain=list(self.ph.sub_gain),
                      noise_gain=self.ph.noise_gain)
 
+    def step_colour(self) -> None:
+        """Static colouring of the output: instrument vs. model for a bright sawtooth."""
+        from . import engine as _engine
+        from .features import tonal_bank
+
+        bank = tonal_bank()
+        hold = 0.45
+        ratios = []
+        saved = self.ph.eq_db.copy()
+        self.ph.eq_db = np.zeros_like(saved)
+        for note in (33, 45):
+            patch = dict(self.base, filter_freq=255)
+            phrase = Phrase([Note(PRE, PRE + hold, note)], PRE + hold + 0.1)
+            y = self.dev.capture(patch, phrase)
+            a, b = int((PRE + 0.1) * self.sr), int((PRE + hold - 0.01) * self.sr)
+            dev_p = bank.mean_power(y[a:b]).astype(np.float64)
+            mod = _engine.render(patch, phrase, self.ph, self.sr)
+            mod_p = bank.mean_power(mod[a:b]).astype(np.float64)
+            ok = (dev_p > dev_p.max() * 1e-6) & (mod_p > mod_p.max() * 1e-6)
+            r = np.where(ok, 10.0 * np.log10((dev_p + 1e-30) / (mod_p + 1e-30)), np.nan)
+            ratios.append(r)
+        ratio = np.nanmean(np.array(ratios), axis=0)
+        centers = bank.centers
+        good = np.isfinite(ratio)
+        if good.sum() < 10:
+            self.ph.eq_db = saved
+            self._report("Output colouring", False, "could not be measured")
+            return
+        ratio = np.interp(np.log2(centers), np.log2(centers[good]), ratio[good])
+        # remove the overall level, smooth over about a third of an octave
+        ratio -= np.median(ratio)
+        logc = np.log2(centers)
+        smooth = np.array([np.mean(ratio[np.abs(logc - c) < 0.25]) for c in logc])
+        eq = np.interp(np.log2(self.ph.eq_freqs), logc, smooth)
+        self.ph.eq_db = np.clip(eq, -15.0, 15.0)
+        self.ph.calibrated["colour"] = True
+        self._report("Output colouring", True,
+                     f"{self.ph.eq_db.min():+.1f} .. {self.ph.eq_db.max():+.1f} dB relative to the model",
+                     freqs=[float(f) for f in self.ph.eq_freqs], db=[float(v) for v in self.ph.eq_db])
+
     def step_nrpn(self) -> None:
         """Do the NRPN controlled switches respond?  (waveform select is the important one)"""
         hold = 0.3
@@ -556,7 +596,7 @@ class Calibrator:
     def run(self, quick: bool = False) -> CalibrationResult:
         steps = [self.step_signal, self.step_tuning, self.step_nrpn, self.step_envelopes, self.step_sustain,
                  self.step_cutoff, self.step_resonance, self.step_env_depth, self.step_tracking, self.step_acid,
-                 self.step_levels]
+                 self.step_levels, self.step_colour]
         if quick:
             steps = [self.step_signal, self.step_tuning, self.step_nrpn]
         self._total = len(steps)
