@@ -40,6 +40,7 @@ class Device:
         self.latency = 0.0  # seconds between sending a note and hearing it
         self.plays = 0
         self.cancel_event: Optional[threading.Event] = None
+        self.fine_offset = 0  # cents added to both oscillators (tuning the patch to a recording)
 
     # -- to implement ------------------------------------------------------
     def set_patch(self, patch: Dict[str, int], force: bool = False) -> None:
@@ -64,7 +65,7 @@ class Device:
     def capture(self, patch: Dict[str, int], phrase: Phrase, n_samples: Optional[int] = None) -> np.ndarray:
         """Set the patch, play the phrase and return latency compensated audio
         at the analysis sample rate."""
-        self.set_patch(patch)
+        self.set_patch(apply_tuning(patch, self.fine_offset))
         raw = self.play(phrase, extra=self.latency + 0.05)
         skip = int(round(self.latency * self.sr))
         y = to_analysis(raw[skip:], self.sr)
@@ -79,6 +80,17 @@ class Device:
 
 class Cancelled(Exception):
     """Raised when the user stops a running job."""
+
+
+def apply_tuning(patch: Dict[str, int], cents: int) -> Dict[str, int]:
+    """Shift the fine tune of both oscillators by ``cents`` (detune between them is kept)."""
+    if not cents:
+        return patch
+    out = dict(patch)
+    for key in ("osc1_fine", "osc2_fine"):
+        p = PARAMS[key]
+        out[key] = p.clamp(out.get(key, p.init) + int(cents))
+    return out
 
 
 def hidden_physics(variant: int = 0) -> Physics:
