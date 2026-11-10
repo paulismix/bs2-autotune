@@ -25,7 +25,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import scipy.signal
 
-from .audio_util import envelope, peak_db, rms_db, to_analysis
+from .audio_util import envelope, to_analysis
 from .device import Cancelled, Device, DeviceError
 from .engine import Note, Phrase, Physics, filter_mag_db
 from .features import ANALYSIS_SR
@@ -620,7 +620,7 @@ class Calibrator:
         """
         from concurrent.futures import ThreadPoolExecutor
 
-        from .features import Target, extract
+        from .features import Target
         from .model import Model
         from .search import CMA
 

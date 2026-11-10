@@ -22,7 +22,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .model import Model
-from .params import PARAMS, baseline_patch
+from .params import PARAMS, baseline_patch, init_patch
 from .static_match import FILTER_MODES, StaticMatcher
 
 # ---------------------------------------------------------------------------
@@ -502,7 +502,6 @@ class PatchOptimizer:
         return patch, loss
 
     def block_filter(self, patch, loss, width, modes: Optional[Sequence[str]] = None):
-        cur_mode = structure_of_patch(patch)["filter_mode"]
         variants = []
         if width >= 1.0:
             cutoffs = [int(v) for v in np.linspace(25, 255, 13)]
@@ -807,4 +806,12 @@ def clean_patch(patch: Dict[str, int]) -> Dict[str, int]:
             out[key] = base[key]
     if out["amp_sustain"] >= 127:
         out["amp_decay"] = base["amp_decay"]
+    # an LFO that modulates nothing: leave it exactly as in an initialised patch
+    init = init_patch()
+    if out["osc1_lfo1_pitch"] == 128 and out["osc2_lfo1_pitch"] == 128:
+        for key in ("lfo1_wave", "lfo1_speed", "lfo1_delay", "lfo1_slew", "lfo1_mode", "lfo1_keysync"):
+            out[key] = init[key]
+    if out["filter_lfo2"] == 128 and out["osc1_lfo2_pw"] == 64 and out["osc2_lfo2_pw"] == 64:
+        for key in ("lfo2_wave", "lfo2_speed", "lfo2_delay", "lfo2_slew", "lfo2_mode", "lfo2_keysync"):
+            out[key] = init[key]
     return out

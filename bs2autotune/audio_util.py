@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import math
-import struct
 import wave
 from fractions import Fraction
-from typing import Optional
 
 import numpy as np
 import scipy.signal

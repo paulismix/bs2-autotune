@@ -1,6 +1,5 @@
 """Shared fixtures.  Slow end-to-end tests run only with ``pytest --runslow``."""
 
-import numpy as np
 import pytest
 
 from bs2autotune import engine, features

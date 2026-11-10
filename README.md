@@ -213,8 +213,13 @@ Honest version, because it matters for a tool that talks to hardware:
   latency, noise, tuning drift, coloured output), connected through a simulated MIDI and audio rig with its
   own clock. On it, matching a hidden patch typically ends at a distance of 0.06 - 0.13 with the right
   oscillator and filter structure.
-* **Not tested: the real thing.** The software was developed without access to a Bass Station II, so real
-  CoreMIDI/CoreAudio operation and the fidelity on real hardware are unproven until you run it. The first
+* **Tested against the real libraries, without the synth:** the MIDI layer on the actual `mido` /
+  `python-rtmidi` stack with a stand-in synth on virtual ports (`tests/test_real_midi.py`: a complete patch
+  arrives intact, notes, and the SysEx request and its answer). During development this ran on Linux; on your
+  Mac the same test runs through CoreMIDI and is a quick way to check the MIDI side without touching the
+  synth. The audio input code was run against PortAudio with a silent dummy device.
+* **Not tested: the real thing.** The software was developed without access to a Bass Station II or a Mac, so
+  operation with CoreMIDI/CoreAudio and the fidelity on real hardware are unproven until you run it. The first
   things to check are *Test signal* and *Calibrate* in step 1: they verify the connection end to end, and the
   calibration reports anything on your unit that does not respond as expected (it also notices if waveform
   switching or filter tracking cannot be controlled over MIDI on your firmware, and then leaves them alone).
@@ -245,6 +250,8 @@ place to look - and worth attaching to a bug report.
   spectrograms show movement in the reference that the synth lacks, it is probably an LFO or an effect.
 * **Port 8765 is taken** - `./start.command --port 8777`.
 * **The page does not react during a match** - one job runs at a time; *Stop* ends it within one play.
+* **The result suddenly got worse during a match** - do not touch the synth's controls while the app works:
+  it only sends what it changes, so a knob moved by hand goes unnoticed. Start the match again.
 
 ## Development
 
@@ -264,7 +271,7 @@ bs2autotune/
   hardware.py      MIDI and audio I/O                  analysis.py     pitch, onsets, notes, excerpt
   separation.py    bass isolation                      app.py          jobs, settings, results, library
   server.py        local HTTP server and API           web/            the page (plain HTML, CSS, JavaScript)
-tests/             unit tests, simulated rig (fakes.py), end-to-end tests
+tests/             unit tests, simulated rig (fakes.py), real MIDI stack on virtual ports, end-to-end tests
 ```
 
 ## Sources and credits

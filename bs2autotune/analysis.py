@@ -17,8 +17,8 @@ import os
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Sequence, Tuple
+from dataclasses import dataclass
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import scipy.signal
@@ -330,7 +330,6 @@ def transcribe(y: np.ndarray, sr: int = ANALYSIS_SR, sensitivity: float = 0.4) -
     feats = extract(y, cfg)
     hop_b = cfg.hop_b / cfg.sr
     env = 10.0 * np.log10(feats.b.sum(axis=1) + 1e-20)
-    env_peak = float(env.max())
     onset_times = detect_onsets(feats.b, hop_b, sensitivity, frame_periods(len(feats.b), hop_b, times, f0))
 
     midi = np.where(f0 > 0, 69.0 + 12.0 * np.log2(np.maximum(f0, 1e-6) / 440.0), np.nan)

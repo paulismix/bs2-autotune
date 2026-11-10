@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import threading
 import time
-from typing import Callable, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import scipy.signal
@@ -22,7 +22,7 @@ from . import engine
 from .audio_util import biquad_shelf, fit_length, to_analysis
 from .engine import Phrase, Physics
 from .features import ANALYSIS_SR
-from .params import PARAMS, baseline_patch, normalize_patch
+from .params import PARAMS, baseline_patch
 
 
 class DeviceError(RuntimeError):

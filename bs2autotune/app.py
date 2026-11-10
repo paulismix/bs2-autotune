@@ -25,13 +25,13 @@ from . import __version__
 from .analysis import (AudioError, RefNote, Reference, build_reference, choose_excerpt, load_audio, note_name,
                        to_mono, transcribe)
 from .audio_util import normalize_peak, peak_db, resample, write_wav
-from .calibration import CalibrationResult, Calibrator
+from .calibration import Calibrator
 from .device import Cancelled, Device, DeviceError, VirtualDevice, apply_tuning
 from .engine import Note, Phrase, Physics
 from .features import ANALYSIS_SR, Target, extract
 from .imaging import spectrogram_png
 from .model import Model
-from .params import (PARAMS, baseline_patch, describe_patch, dump_with_name, normalize_patch, patch_text)
+from .params import describe_patch, dump_with_name, normalize_patch, patch_text
 from .refine import HardwareLoop
 from .search import ModelSearch, clean_patch, describe_structure
 from .separation import demucs_available, separate_bass
@@ -662,7 +662,6 @@ class App:
         folder = self.path("sessions", sid)
         os.makedirs(folder, exist_ok=True)
         audio = out.audio if out.audio is not None else np.zeros(target.n_samples, dtype=np.float32)
-        ref_rms = float(np.sqrt(np.mean(np.square(reference.audio, dtype=np.float64)))) + 1e-9
         syn_rms = float(np.sqrt(np.mean(np.square(audio, dtype=np.float64)))) + 1e-9
         ref_out = normalize_peak(reference.audio, 0.8)
         gain = (float(np.sqrt(np.mean(np.square(ref_out, dtype=np.float64)))) + 1e-9) / syn_rms
