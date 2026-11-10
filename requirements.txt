@@ -1,5 +1,7 @@
 # BS2 Autotune - runtime requirements (Python 3.10 - 3.12 recommended)
-numpy>=1.26
+numpy>=1.26 ; sys_platform != "darwin" or platform_machine != "x86_64"
+# Intel Macs: the last PyTorch built for them (needed by the optional Demucs) requires NumPy 1.x
+numpy>=1.26,<2 ; sys_platform == "darwin" and platform_machine == "x86_64"
 scipy>=1.11
 numba>=0.59
 soundfile>=0.12.1
@@ -7,7 +9,7 @@ sounddevice>=0.4.6
 mido>=1.3.2
 python-rtmidi>=1.5.8
 
-# Optional, for full songs (bass isolation); large download:
+# Optional, for complete songs (bass isolation); large download - the launcher offers it:
 #   pip install demucs
 # Optional, to run the tests:
 #   pip install pytest

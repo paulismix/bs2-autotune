@@ -51,4 +51,39 @@ if [ ! -f "$READY" ] || [ requirements.txt -nt "$READY" ]; then
     echo "Setup finished."
 fi
 
+# Optional: Demucs picks the bass out of complete songs. Asked once; set
+# BS2AUTOTUNE_DEMUCS=1 (install) or =0 (skip) to decide without the question.
+DEMUCS_MARK="$VENV/.bs2autotune-demucs"
+if [ ! -f "$DEMUCS_MARK" ]; then
+    choice="${BS2AUTOTUNE_DEMUCS:-ask}"
+    if [ "$choice" = "ask" ]; then
+        if [ -t 0 ] && [ -t 1 ]; then
+            echo
+            echo "Optional: with Demucs the app can pick the bass out of a complete song."
+            echo "It is a large download (PyTorch; about 1 GB on disk). Isolated bass lines work without it."
+            read -r -p "Install Demucs now? [Y/n] " answer
+            case "$answer" in [nN]*) choice=0 ;; *) choice=1 ;; esac
+        else
+            choice="later"  # not started from a terminal: do not begin a large download unasked
+        fi
+    fi
+    if [ "$choice" = "1" ]; then
+        echo "Installing Demucs ..."
+        if command -v uv >/dev/null 2>&1; then
+            uv pip install --python "$VENV/bin/python" demucs
+        else
+            "$VENV/bin/python" -m pip install demucs
+        fi
+        if [ $? -eq 0 ]; then
+            echo installed > "$DEMUCS_MARK"
+        else
+            echo failed > "$DEMUCS_MARK"
+            echo "Demucs could not be installed. The app works without it; see README.md (full songs)."
+        fi
+    elif [ "$choice" = "0" ]; then
+        echo skipped > "$DEMUCS_MARK"
+        echo "Skipping Demucs. To add it later: $VENV/bin/python -m pip install demucs"
+    fi
+fi
+
 exec "$VENV/bin/python" -m bs2autotune "$@"

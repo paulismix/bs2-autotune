@@ -28,8 +28,9 @@ Everything runs locally on your Mac, with a web interface at `http://127.0.0.1:8
    ```
 
    You can also double-click `start.command` in Finder. The first start creates a private Python environment
-   in `.venv` and installs the requirements (a few minutes); after that the app starts within seconds and
-   opens the browser.
+   in `.venv` and installs the requirements (a few minutes), and asks once whether to add Demucs, which the
+   app needs to pick the bass out of complete songs (optional, a large download). After that the app starts
+   within seconds and opens the browser.
 3. Follow the four steps on the page: **Connect → Reference → Match → Result**.
 
 No synth at hand? `./start.command --demo` runs the complete workflow against a built-in virtual synth.
@@ -105,14 +106,16 @@ selected) a `.syx` backup.
 
 * **An isolated bass line is by far the best reference.** Use a stem, an intro or a break where the bass
   plays alone, if there is one.
-* **Full songs** need the bass isolated first. With Demucs installed the app uses it automatically:
+* **Full songs** need the bass isolated first. With Demucs installed the app uses it automatically. The
+  launcher offers to install it; to add it later:
 
   ```bash
   .venv/bin/python -m pip install demucs      # large download; model weights are fetched on first use
   ```
 
   Without Demucs the built-in fallback keeps only the low end (below roughly 400 Hz) and matches that part of
-  the spectrum. It finds the right notes and the body of the sound, but cannot judge its brightness.
+  the spectrum. It finds most of the notes and the body of the sound, but it cannot judge the brightness, and
+  kick drums stay in the picture. Where the song has a bar or two of bass on its own, select that instead.
 * **Choose a passage with several different notes, short and long.** Short notes reveal the attack and the
   filter envelope, long ones the sustained tone, different pitches the filter's key tracking.
 * **Tune the patch to the recording** (checkbox in step 2) if you want to play along with the original:
@@ -153,8 +156,10 @@ another synth's filter character can only be approximated.
 
 1. **Reading the reference** (`analysis.py`, `separation.py`). The file is decoded and - for a mix - the
    bass is isolated. A YIN-type pitch tracker with a Viterbi path and an onset detector turn the audio into
-   notes. Low, bright notes are a classic trap here: a short analysis window sees every single period as a
-   click, so note starts are confirmed on a spectrum that is averaged over exactly one pitch period.
+   notes. Three classic traps are handled here: a short analysis window sees every single period of a low,
+   bright note as a click, so note starts are confirmed on a spectrum averaged over exactly one pitch period;
+   detuned oscillators beat, which looks like re-attacks; and an isolated stem still carries hi-hats and
+   kicks some 20 dB down, which must neither split notes nor hide where they start.
 2. **A model of the synth** (`engine.py`). A fast simulation of the Bass Station II signal path: band-limited
    oscillators, sub oscillator, noise, ring modulator, mixer and overdrive, Classic (state variable) and Acid
    (diode ladder type) filters, two ADSR envelopes, LFOs, distortion. It is compiled with numba and renders
