@@ -115,3 +115,28 @@ def test_builtin_isolation_keeps_the_low_end(line):
     assert p_out[high].sum() < 0.01 * p_in[high].sum()  # the rest is gone
     weights = dict(zip(sep.reliability[:, 0].round().astype(int), sep.reliability[:, 1]))
     assert weights[80] == 1.0 and weights[1016] < 0.1
+
+
+def test_demucs_integration(monkeypatch):
+    """Runs only with the optional demucs package installed.  The trained weights are not
+    downloaded: an untrained model exercises the whole integration, the audio is meaningless."""
+    pretrained = pytest.importorskip("demucs.pretrained")
+    torch = pytest.importorskip("torch")
+    from demucs.htdemucs import HTDemucs
+
+    def untrained(name, repo=None):
+        assert name == "htdemucs"
+        torch.manual_seed(0)
+        return HTDemucs(sources=["drums", "bass", "other", "vocals"])
+
+    monkeypatch.setattr(pretrained, "get_model", untrained)
+    sr = 44100
+    t = np.arange(int(2.5 * sr)) / sr
+    left = 0.4 * np.sign(np.sin(2 * np.pi * 55 * t)) + 0.2 * np.sin(2 * np.pi * 880 * t)
+    stereo = np.stack([left, 0.8 * left], axis=1).astype(np.float32)
+    messages = []
+    sep = separate_bass(stereo, sr, "demucs", messages.append)
+    assert sep.method == "demucs" and sep.bass.dtype == np.float32
+    assert abs(len(sep.bass) - 2.5 * 32000) < 40 and np.isfinite(sep.bass).all()
+    assert sep.reliability.shape == (30, 2) and sep.reliability[:, 1].min() >= 0.1
+    assert any("Demucs" in m for m in messages)

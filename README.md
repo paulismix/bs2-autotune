@@ -85,14 +85,14 @@ the *Note splitting* slider and analyse again.
 synth (no sound), then plays candidates on the real synth and refines the best one. You can stop at any time;
 the best patch so far is kept.
 
-| Effort   | Plays on the synth | Good for                                   |
-|----------|--------------------|--------------------------------------------|
-| Quick    | about 24           | a first impression                         |
-| Normal   | about 60           | the default                                |
-| Thorough | about 130          | squeezing out the last bit, difficult sounds |
+| Effort   | Plays on the synth | Time for a 4 second excerpt | Good for                                     |
+|----------|--------------------|-----------------------------|----------------------------------------------|
+| Quick    | about 24           | about 3 minutes             | a first impression                           |
+| Normal   | about 60           | about 6 minutes             | the default                                  |
+| Thorough | about 130          | about 13 minutes            | squeezing out the last bit, difficult sounds |
 
-One play lasts as long as the excerpt, so a normal match of a four second excerpt takes a few minutes of
-model search plus about five minutes on the synth.
+One play lasts as long as the excerpt, which is where most of the time goes; the page shows an estimate for
+your excerpt. You will hear the synth play the phrase over and over - that is how the app listens.
 
 **4 Result** - an A/B player for reference and synth at equal loudness, both spectrograms, the distance and
 how it developed, and the patch as a sheet that lists only what differs from an initialised patch. *Send to the
@@ -223,8 +223,10 @@ Honest version, because it matters for a tool that talks to hardware:
   things to check are *Test signal* and *Calibrate* in step 1: they verify the connection end to end, and the
   calibration reports anything on your unit that does not respond as expected (it also notices if waveform
   switching or filter tracking cannot be controlled over MIDI on your firmware, and then leaves them alone).
-* **Not tested: Demucs.** The integration is written against its documented Python API, but its model
-  weights could not be downloaded in the development environment.
+* **Half tested: Demucs.** The integration runs with the real `demucs` and `torch` packages
+  (`pip install demucs` resolves on Python 3.12; there is a test for it), but only with an untrained model:
+  the trained weights could not be downloaded in the development environment. So the code path is proven,
+  the separation quality on real songs is not.
 * **The MIDI implementation** was taken from two independent community sources that agree with each other
   (see below), not from Novation's own documents. Parameters added by firmware 2.5 and 4.14 can be left out
   with the checkbox in step 1 if your unit runs older firmware.
